@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, 
   User, 
@@ -11,16 +11,27 @@ import {
   FileText, 
   Tag as TagIcon,
   Palette,
-  Check
+  Check,
+  Camera,
+  Sparkles,
+  Loader2,
+  Image as ImageIcon,
+  Key
 } from 'lucide-react';
 import { BusinessCardData, CardTheme } from '../types/card';
 import { THEME_CONFIGS } from '../utils/theme';
+import { 
+  getGeminiApiKey, 
+  resizeImageToDataUrl, 
+  extractCardInfoWithGemini 
+} from '../utils/geminiOcr';
 
 interface CardFormModalProps {
   initialData?: BusinessCardData | null;
   isOpen: boolean;
   onClose: () => void;
   onSave: (card: Omit<BusinessCardData, 'id' | 'createdAt' | 'updatedAt'>, id?: string) => void;
+  onOpenApiKeyModal: () => void;
 }
 
 const THEME_OPTIONS: CardTheme[] = [
@@ -37,6 +48,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  onOpenApiKeyModal,
 }) => {
   const [name, setName] = useState('');
   const [position, setPosition] = useState('');
@@ -51,6 +63,14 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
   const [tagInput, setTagInput] = useState('');
   const [theme, setTheme] = useState<CardTheme>('modern-blue');
   const [isFavorite, setIsFavorite] = useState(false);
+
+  // AI OCR state
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanStatusMessage, setScanStatusMessage] = useState('');
+  const [scannedImagePreview, setScannedImagePreview] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (initialData) {
@@ -67,6 +87,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       setTagInput(initialData.tags?.join(', ') || '');
       setTheme(initialData.theme || 'modern-blue');
       setIsFavorite(initialData.isFavorite ?? false);
+      setScannedImagePreview(initialData.avatarUrl || null);
     } else {
       setName('');
       setPosition('');
@@ -81,10 +102,65 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       setTagInput('');
       setTheme('modern-blue');
       setIsFavorite(false);
+      setScannedImagePreview(null);
     }
   }, [initialData, isOpen]);
 
   if (!isOpen) return null;
+
+  // AI Camera / Image recognition handler
+  const handleImageCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      alert('AI 명함 인식을 위해 먼저 Google Gemini 무료 API 키를 등록해주세요.');
+      onOpenApiKeyModal();
+      e.target.value = '';
+      return;
+    }
+
+    try {
+      setIsScanning(true);
+      setScanStatusMessage('사진 최적화 및 압축 중...');
+
+      // Resize & compress image
+      const { dataUrl, base64Data, mimeType } = await resizeImageToDataUrl(file);
+      setScannedImagePreview(dataUrl);
+
+      setScanStatusMessage('Gemini AI가 명함 정보를 정밀 판독하는 중...');
+      const extracted = await extractCardInfoWithGemini(base64Data, mimeType, apiKey);
+
+      // Auto-fill form fields
+      if (extracted.name) setName(extracted.name);
+      if (extracted.position) setPosition(extracted.position);
+      if (extracted.company) setCompany(extracted.company);
+      if (extracted.department) setDepartment(extracted.department);
+      if (extracted.phone) setPhone(extracted.phone);
+      if (extracted.tel) setTel(extracted.tel);
+      if (extracted.email) setEmail(extracted.email);
+      if (extracted.website) setWebsite(extracted.website);
+      if (extracted.address) setAddress(extracted.address);
+      if (extracted.memo) setMemo(extracted.memo);
+      if (extracted.tags && extracted.tags.length > 0) {
+        setTagInput(extracted.tags.join(', '));
+      }
+
+      setScanStatusMessage('완료! 정보를 확인해주세요.');
+      setTimeout(() => {
+        setIsScanning(false);
+        setScanStatusMessage('');
+      }, 1200);
+    } catch (err: any) {
+      console.error('OCR Error:', err);
+      alert(err.message || '명함 인식 중 오류가 발생했습니다.');
+      setIsScanning(false);
+      setScanStatusMessage('');
+    } finally {
+      e.target.value = '';
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,6 +189,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
         tags,
         theme,
         isFavorite,
+        avatarUrl: scannedImagePreview || undefined,
       },
       initialData?.id
     );
@@ -121,9 +198,9 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto animate-fade-in">
       <div 
-        className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden my-8 border border-slate-100"
+        className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden my-6 border border-slate-100"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -133,7 +210,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
               {initialData ? '명함 정보 수정' : '새 명함 등록'}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              입력하신 정보는 vCard 호환 형식으로 자동 변환 및 저장됩니다.
+              카메라로 찍거나 직접 입력하여 스마트하게 관리하세요.
             </p>
           </div>
           <button
@@ -144,8 +221,107 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
           </button>
         </div>
 
+        {/* AI Camera Scan Banner */}
+        <div className="p-4 sm:p-6 bg-gradient-to-r from-blue-50/90 via-indigo-50/70 to-blue-50/90 border-b border-blue-100/80">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-md shadow-blue-500/25 shrink-0">
+                <Sparkles className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                  <span>AI 스마트 명함 스캐너</span>
+                  <span className="text-[10px] bg-blue-600 text-white font-bold px-1.5 py-0.2 rounded-md">Gemini</span>
+                </h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  명함을 촬영하면 이름, 회사, 연락처를 1초 만에 자동 완성합니다.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {/* Mobile Camera Direct Button */}
+              <button
+                type="button"
+                disabled={isScanning}
+                onClick={() => cameraInputRef.current?.click()}
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-600/20 transition active:scale-95 disabled:opacity-50"
+              >
+                <Camera className="w-4 h-4" />
+                <span>카메라 촬영</span>
+              </button>
+
+              {/* Photo Album Button */}
+              <button
+                type="button"
+                disabled={isScanning}
+                onClick={() => fileInputRef.current?.click()}
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold shadow-xs transition active:scale-95 disabled:opacity-50"
+              >
+                <ImageIcon className="w-4 h-4 text-slate-500" />
+                <span>사진 선택</span>
+              </button>
+
+              {/* API Key settings shortcut */}
+              <button
+                type="button"
+                onClick={onOpenApiKeyModal}
+                title="Gemini API 키 설정"
+                className="p-2 rounded-xl bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-800 border border-slate-200 transition"
+              >
+                <Key className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Hidden inputs for camera capture & file selector */}
+          <input
+            type="file"
+            ref={cameraInputRef}
+            onChange={handleImageCapture}
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+          />
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleImageCapture}
+            accept="image/*"
+            className="hidden"
+          />
+
+          {/* AI Scanning progress status indicator */}
+          {isScanning && (
+            <div className="mt-3.5 pt-3 border-t border-blue-200/60 flex items-center gap-3 bg-white/70 p-3 rounded-2xl animate-pulse">
+              <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold text-blue-900">{scanStatusMessage}</p>
+                <p className="text-[11px] text-slate-500">잠시만 기다려주세요...</p>
+              </div>
+            </div>
+          )}
+
+          {/* Scanned Card Preview Thumbnail */}
+          {scannedImagePreview && !isScanning && (
+            <div className="mt-3 pt-3 border-t border-blue-200/60 flex items-center justify-between text-xs">
+              <span className="text-slate-600 flex items-center gap-1 font-medium">
+                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                <span>명함 이미지 첨부됨</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setScannedImagePreview(null)}
+                className="text-slate-400 hover:text-rose-500 text-[11px]"
+              >
+                이미지 지우기
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-6 max-h-[75vh] overflow-y-auto">
+        <form onSubmit={handleSubmit} className="p-6 space-y-6 max-h-[60vh] sm:max-h-[65vh] overflow-y-auto">
           {/* Card Theme Selection */}
           <div>
             <label className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
@@ -362,7 +538,8 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-6 py-2.5 text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/25 transition active:scale-95"
+              disabled={isScanning}
+              className="px-6 py-2.5 text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/25 transition active:scale-95 disabled:opacity-50"
             >
               {initialData ? '수정 완료' : '명함 저장'}
             </button>

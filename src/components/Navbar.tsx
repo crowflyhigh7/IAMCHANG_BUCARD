@@ -6,7 +6,9 @@ import {
   Search, 
   Download, 
   Upload, 
-  Layers
+  Key,
+  Camera,
+  Sparkles
 } from 'lucide-react';
 import { BusinessCardData } from '../types/card';
 import { exportBackupJSON } from '../utils/storage';
@@ -17,6 +19,7 @@ interface NavbarProps {
   totalCards: number;
   onOpenNewModal: () => void;
   onOpenMyCardModal: () => void;
+  onOpenApiKeyModal: () => void;
   cards: BusinessCardData[];
   myCard: BusinessCardData;
   onImportBackup: (importedCards: BusinessCardData[], importedMyCard?: BusinessCardData) => void;
@@ -28,6 +31,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   totalCards,
   onOpenNewModal,
   onOpenMyCardModal,
+  onOpenApiKeyModal,
   cards,
   myCard,
   onImportBackup,
@@ -61,7 +65,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 backdrop-blur-md transition-all shadow-sm">
+    <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 backdrop-blur-md transition-all shadow-xs pt-safe">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 gap-3 sm:gap-6">
           {/* Logo & Branding */}
@@ -74,8 +78,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <span className="font-extrabold text-xl tracking-tight bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
                   BUCARD
                 </span>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100 hidden sm:inline-block">
-                  v1.0
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-blue-50 text-blue-600 border border-blue-100 hidden sm:inline-block">
+                  AI OCR
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 hidden md:block leading-none mt-0.5">
@@ -108,14 +112,23 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Action buttons */}
           <div className="flex items-center gap-2 shrink-0">
+            {/* AI API Key Button */}
+            <button
+              onClick={onOpenApiKeyModal}
+              title="Gemini AI 키 설정"
+              className="p-2 text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded-xl transition"
+            >
+              <Key className="w-4 h-4" />
+            </button>
+
             {/* My Card Button */}
             <button
               onClick={onOpenMyCardModal}
               title="내 디지털 명함 보기 및 QR 공유"
-              className="flex items-center gap-1.5 px-3 py-2 text-sm font-semibold rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 transition active:scale-95"
+              className="hidden sm:flex items-center gap-1.5 px-3 py-2 text-sm font-semibold rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 transition active:scale-95"
             >
               <QrCode className="w-4 h-4 text-indigo-600" />
-              <span className="hidden sm:inline">내 명함</span>
+              <span>내 명함</span>
             </button>
 
             {/* Backup / Export Menu */}
@@ -146,9 +159,10 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Add Card Button */}
             <button
               onClick={onOpenNewModal}
-              className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/25 transition active:scale-95"
+              className="flex items-center gap-1.5 px-3.5 sm:px-4 py-2 text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/25 transition active:scale-95"
             >
-              <Plus className="w-4 h-4 stroke-[2.5]" />
+              <Camera className="w-4 h-4 sm:hidden stroke-[2.5]" />
+              <Plus className="w-4 h-4 hidden sm:inline stroke-[2.5]" />
               <span className="hidden xs:inline">명함 추가</span>
             </button>
           </div>

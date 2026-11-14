@@ -13,7 +13,10 @@ import {
   FolderOpen,
   Smartphone,
   Download,
-  X
+  X,
+  Camera,
+  Sparkles,
+  Key
 } from 'lucide-react';
 import { BusinessCardData, ViewMode } from './types/card';
 import { 
@@ -23,6 +26,7 @@ import {
   saveMyCard,
   INITIAL_CARDS 
 } from './utils/storage';
+import { getGeminiApiKey } from './utils/geminiOcr';
 import { Navbar } from './components/Navbar';
 import { BusinessCard } from './components/BusinessCard';
 import { CardModal } from './components/CardModal';
@@ -31,6 +35,7 @@ import { MyCardModal } from './components/MyCardModal';
 import { ShareQRModal } from './components/ShareQRModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { InstallPromptModal } from './components/InstallPromptModal';
+import { ApiKeyModal } from './components/ApiKeyModal';
 import { THEME_CONFIGS } from './utils/theme';
 
 export function App() {
@@ -52,6 +57,7 @@ export function App() {
   const [editingCard, setEditingCard] = useState<BusinessCardData | null>(null);
   const [isMyCardModalOpen, setIsMyCardModalOpen] = useState(false);
   const [isEditingMyCard, setIsEditingMyCard] = useState(false);
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
 
   // PWA Install state
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -277,6 +283,7 @@ export function App() {
           setIsFormModalOpen(true);
         }}
         onOpenMyCardModal={() => setIsMyCardModalOpen(true)}
+        onOpenApiKeyModal={() => setIsApiKeyModalOpen(true)}
       />
 
       {/* Main Content Area - with bottom padding for mobile bottom nav */}
@@ -306,7 +313,7 @@ export function App() {
             {!isStandalone && (
               <button
                 onClick={() => setIsInstallModalOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 transition active:scale-95"
+                className="hidden sm:flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 transition active:scale-95"
               >
                 <Download className="w-3.5 h-3.5 text-blue-600" />
                 <span>앱 설치</span>
@@ -324,10 +331,10 @@ export function App() {
                 setIsEditingMyCard(false);
                 setIsFormModalOpen(true);
               }}
-              className="flex-1 sm:flex-initial px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition active:scale-95 shadow-sm shadow-blue-600/25 flex items-center justify-center gap-1"
+              className="flex-1 sm:flex-initial px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition active:scale-95 shadow-sm shadow-blue-600/25 flex items-center justify-center gap-1.5"
             >
-              <Plus className="w-4 h-4 stroke-[2.5]" />
-              <span>명함 추가</span>
+              <Camera className="w-4 h-4 stroke-[2.5]" />
+              <span>명함 스캔 / 등록</span>
             </button>
           </div>
         </div>
@@ -506,7 +513,7 @@ export function App() {
             <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-5">
               {searchQuery || selectedTag || onlyFavorites
                 ? '검색어나 필터를 초기화해 보세요.'
-                : '첫 번째 비즈니스 파트너의 명함을 등록하고 스마트하게 관리해보세요.'}
+                : '첫 번째 비즈니스 파트너의 명함을 카메라로 찍어 스마트하게 등록해보세요.'}
             </p>
             {searchQuery || selectedTag || onlyFavorites ? (
               <button
@@ -526,26 +533,27 @@ export function App() {
                   setIsEditingMyCard(false);
                   setIsFormModalOpen(true);
                 }}
-                className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold shadow-md shadow-blue-600/25 transition active:scale-95"
+                className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold shadow-md shadow-blue-600/25 transition active:scale-95 flex items-center gap-1.5 mx-auto"
               >
-                + 새 명함 등록하기
+                <Camera className="w-4 h-4" />
+                <span>명함 카메라 촬영 / 등록</span>
               </button>
             )}
           </div>
         )}
       </main>
 
-      {/* Footer (Desktop only or low-profile on mobile) */}
+      {/* Footer (Desktop only) */}
       <footer className="hidden md:block border-t border-slate-200 bg-white py-6 text-center text-xs text-slate-500 space-y-1">
         <p className="font-semibold text-slate-700">
           BUCARD · 스마트 명함 관리 웹앱 (bucard.iamchang.me)
         </p>
         <p className="text-slate-400">
-          PWA 지원 · 오프라인 캐싱 · React, Vite & Cloudflare Pages
+          AI Vision OCR · PWA 오프라인 지원 · React & Cloudflare Pages
         </p>
       </footer>
 
-      {/* Mobile Bottom Navigation Bar (Fixed bottom on smartphone screens) */}
+      {/* Mobile Bottom Navigation Bar */}
       <MobileBottomNav
         activeTab={mobileTab}
         onSelectTab={handleSelectMobileTab}
@@ -569,7 +577,16 @@ export function App() {
         }}
       />
 
-      {/* Modals */}
+      {/* Gemini API Key Modal */}
+      <ApiKeyModal
+        isOpen={isApiKeyModalOpen}
+        onClose={() => setIsApiKeyModalOpen(false)}
+        onSaved={(key) => {
+          console.log('Gemini API Key updated');
+        }}
+      />
+
+      {/* Card Detail Modal */}
       {selectedCard && (
         <CardModal
           card={selectedCard}
@@ -600,6 +617,7 @@ export function App() {
           setIsEditingMyCard(false);
         }}
         onSave={handleSaveCard}
+        onOpenApiKeyModal={() => setIsApiKeyModalOpen(true)}
       />
 
       {/* My Card Fullscreen Modal */}
