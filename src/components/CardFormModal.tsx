@@ -25,6 +25,7 @@ import {
   resizeImageToDataUrl, 
   extractCardInfoWithGemini 
 } from '../utils/geminiOcr';
+import { uploadCardImage } from '../utils/api';
 
 interface CardFormModalProps {
   initialData?: BusinessCardData | null;
@@ -64,7 +65,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
   const [theme, setTheme] = useState<CardTheme>('modern-blue');
   const [isFavorite, setIsFavorite] = useState(false);
 
-  // AI OCR state
+  // AI OCR & Photo state
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatusMessage, setScanStatusMessage] = useState('');
   const [scannedImagePreview, setScannedImagePreview] = useState<string | null>(null);
@@ -108,7 +109,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
   if (!isOpen) return null;
 
-  // AI Camera / Image recognition handler
+  // AI Camera / Image recognition & R2 cloud upload handler
   const handleImageCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -125,12 +126,21 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       setIsScanning(true);
       setScanStatusMessage('사진 최적화 및 압축 중...');
 
-      // Resize & compress image
+      // 1. Resize & compress image
       const { dataUrl, base64Data, mimeType } = await resizeImageToDataUrl(file);
       setScannedImagePreview(dataUrl);
 
-      setScanStatusMessage('Gemini AI가 명함 정보를 정밀 판독하는 중...');
-      const extracted = await extractCardInfoWithGemini(base64Data, mimeType, apiKey);
+      // 2. Upload to Cloudflare R2 in background
+      setScanStatusMessage('Cloudflare R2 스토리지에 사진 저장 및 AI 분석 중...');
+      const uploadPromise = uploadCardImage(base64Data, mimeType);
+      const ocrPromise = extractCardInfoWithGemini(base64Data, mimeType, apiKey);
+
+      const [r2Url, extracted] = await Promise.all([uploadPromise, ocrPromise]);
+
+      // Set permanent R2 image URL
+      if (r2Url) {
+        setScannedImagePreview(r2Url);
+      }
 
       // Auto-fill form fields
       if (extracted.name) setName(extracted.name);
@@ -147,14 +157,14 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
         setTagInput(extracted.tags.join(', '));
       }
 
-      setScanStatusMessage('완료! 정보를 확인해주세요.');
+      setScanStatusMessage('분석 및 클라우드 저장 완료!');
       setTimeout(() => {
         setIsScanning(false);
         setScanStatusMessage('');
-      }, 1200);
+      }, 1000);
     } catch (err: any) {
-      console.error('OCR Error:', err);
-      alert(err.message || '명함 인식 중 오류가 발생했습니다.');
+      console.error('OCR or Upload Error:', err);
+      alert(err.message || '명함 처리 중 오류가 발생했습니다.');
       setIsScanning(false);
       setScanStatusMessage('');
     } finally {
@@ -210,7 +220,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
               {initialData ? '명함 정보 수정' : '새 명함 등록'}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              카메라로 찍거나 직접 입력하여 스마트하게 관리하세요.
+              카메라로 찍거나 직접 입력하여 클라우드에 영구 보관하세요.
             </p>
           </div>
           <button
@@ -234,7 +244,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
                   <span className="text-[10px] bg-blue-600 text-white font-bold px-1.5 py-0.2 rounded-md">Gemini</span>
                 </h3>
                 <p className="text-xs text-slate-600 mt-0.5">
-                  명함을 촬영하면 이름, 회사, 연락처를 1초 만에 자동 완성합니다.
+                  명함을 촬영하면 사진은 Cloudflare R2에 저장되고, 정보는 자동 완성됩니다.
                 </p>
               </div>
             </div>
@@ -274,7 +284,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
             </div>
           </div>
 
-          {/* Hidden inputs for camera capture & file selector */}
+          {/* Hidden inputs */}
           <input
             type="file"
             ref={cameraInputRef}
@@ -304,17 +314,24 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
           {/* Scanned Card Preview Thumbnail */}
           {scannedImagePreview && !isScanning && (
-            <div className="mt-3 pt-3 border-t border-blue-200/60 flex items-center justify-between text-xs">
-              <span className="text-slate-600 flex items-center gap-1 font-medium">
-                <Check className="w-3.5 h-3.5 text-emerald-600" />
-                <span>명함 이미지 첨부됨</span>
-              </span>
+            <div className="mt-3.5 pt-3 border-t border-blue-200/60 flex items-center justify-between text-xs">
+              <div className="flex items-center gap-3">
+                <img
+                  src={scannedImagePreview}
+                  alt="명함 미리보기"
+                  className="w-16 h-10 object-cover rounded-lg border border-slate-300 shadow-xs"
+                />
+                <span className="text-slate-700 font-semibold flex items-center gap-1">
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>실물 명함 사진이 저장되었습니다</span>
+                </span>
+              </div>
               <button
                 type="button"
                 onClick={() => setScannedImagePreview(null)}
                 className="text-slate-400 hover:text-rose-500 text-[11px]"
               >
-                이미지 지우기
+                사진 삭제
               </button>
             </div>
           )}
@@ -326,7 +343,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
           <div>
             <label className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
               <Palette className="w-3.5 h-3.5 text-blue-600" />
-              <span>명함 디자인 테마</span>
+              <span>명함 디자인 테마 (사진이 없을 때 표시)</span>
             </label>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
               {THEME_OPTIONS.map((thKey) => {

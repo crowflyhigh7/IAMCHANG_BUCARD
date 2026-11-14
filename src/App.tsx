@@ -1,32 +1,29 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Plus, 
   Star, 
-  Layers, 
   LayoutGrid, 
   List, 
   ArrowUpDown, 
-  Tag as TagIcon, 
-  Briefcase,
-  ExternalLink,
-  ShieldCheck,
   FolderOpen,
   Smartphone,
   Download,
   X,
   Camera,
-  Sparkles,
-  Key
+  Cloud,
+  CheckCircle2,
+  RefreshCw
 } from 'lucide-react';
 import { BusinessCardData, ViewMode } from './types/card';
 import { 
-  loadCards, 
-  saveCards, 
-  loadMyCard, 
-  saveMyCard,
-  INITIAL_CARDS 
-} from './utils/storage';
-import { getGeminiApiKey } from './utils/geminiOcr';
+  fetchCards, 
+  createCard, 
+  updateCard, 
+  deleteCard, 
+  fetchMyCard, 
+  saveMyCardApi 
+} from './utils/api';
+import { loadCards, loadMyCard } from './utils/storage';
 import { Navbar } from './components/Navbar';
 import { BusinessCard } from './components/BusinessCard';
 import { CardModal } from './components/CardModal';
@@ -39,13 +36,14 @@ import { ApiKeyModal } from './components/ApiKeyModal';
 import { THEME_CONFIGS } from './utils/theme';
 
 export function App() {
-  const [cards, setCards] = useState<BusinessCardData[]>([]);
+  const [cards, setCards] = useState<BusinessCardData[]>(loadCards());
   const [myCard, setMyCard] = useState<BusinessCardData>(loadMyCard());
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [onlyFavorites, setOnlyFavorites] = useState(false);
   const [sortBy, setSortBy] = useState<'latest' | 'name' | 'company'>('latest');
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Mobile navigation state
   const [mobileTab, setMobileTab] = useState<'cards' | 'favorites' | 'search'>('cards');
@@ -65,17 +63,32 @@ export function App() {
   const [isStandalone, setIsStandalone] = useState(false);
   const [showInstallBanner, setShowInstallBanner] = useState(false);
 
-  // Initial load
-  useEffect(() => {
-    setCards(loadCards());
+  // Load from Cloudflare D1 Backend on mount
+  const syncWithCloud = async () => {
+    setIsSyncing(true);
+    try {
+      const [remoteCards, remoteMyCard] = await Promise.all([
+        fetchCards(),
+        fetchMyCard()
+      ]);
+      setCards(remoteCards);
+      if (remoteMyCard) setMyCard(remoteMyCard);
+    } catch (e) {
+      console.warn('Sync failed:', e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
-    // Check if launched as installed PWA (standalone)
+  useEffect(() => {
+    syncWithCloud();
+
+    // Check standalone PWA mode
     const checkStandalone = 
       window.matchMedia('(display-mode: standalone)').matches || 
       (window.navigator as any).standalone === true;
     setIsStandalone(checkStandalone);
 
-    // Listen for PWA install prompt
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
       setDeferredPrompt(e);
@@ -86,7 +99,7 @@ export function App() {
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
 
-    // Check URL parameters (Shortcuts support)
+    // Shortcuts support
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('open') === 'mycard') {
       setIsMyCardModalOpen(true);
@@ -99,50 +112,48 @@ export function App() {
     };
   }, []);
 
-  // Save on state change
-  const handleUpdateCards = (newCards: BusinessCardData[]) => {
-    setCards(newCards);
-    saveCards(newCards);
-  };
-
-  const handleUpdateMyCard = (updated: BusinessCardData) => {
-    setMyCard(updated);
-    saveMyCard(updated);
-  };
-
   // Toggle favorite
-  const handleToggleFavorite = (id: string, e?: React.MouseEvent) => {
+  const handleToggleFavorite = async (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    const updated = cards.map((c) => 
-      c.id === id ? { ...c, isFavorite: !c.isFavorite, updatedAt: Date.now() } : c
-    );
-    handleUpdateCards(updated);
+    const target = cards.find((c) => c.id === id);
+    if (!target) return;
+
+    const updated = { ...target, isFavorite: !target.isFavorite, updatedAt: Date.now() };
+    const nextList = cards.map((c) => (c.id === id ? updated : c));
+    setCards(nextList);
     if (selectedCard && selectedCard.id === id) {
-      setSelectedCard((prev) => prev ? { ...prev, isFavorite: !prev.isFavorite } : null);
+      setSelectedCard(updated);
     }
+
+    await updateCard(updated);
   };
 
   // Save or edit card
-  const handleSaveCard = (cardData: Omit<BusinessCardData, 'id' | 'createdAt' | 'updatedAt'>, id?: string) => {
+  const handleSaveCard = async (cardData: Omit<BusinessCardData, 'id' | 'createdAt' | 'updatedAt'>, id?: string) => {
     if (isEditingMyCard) {
       const updated: BusinessCardData = {
         ...myCard,
         ...cardData,
         updatedAt: Date.now(),
       };
-      handleUpdateMyCard(updated);
+      setMyCard(updated);
       setIsEditingMyCard(false);
+      await saveMyCardApi(updated);
       return;
     }
 
     if (id) {
       // Edit existing
-      const updated = cards.map((c) => 
-        c.id === id 
-          ? { ...c, ...cardData, updatedAt: Date.now() } 
-          : c
-      );
-      handleUpdateCards(updated);
+      const existing = cards.find((c) => c.id === id);
+      const updated: BusinessCardData = {
+        ...existing,
+        ...cardData,
+        id,
+        createdAt: existing?.createdAt || Date.now(),
+        updatedAt: Date.now(),
+      };
+      setCards(cards.map((c) => (c.id === id ? updated : c)));
+      await updateCard(updated);
     } else {
       // Create new
       const newCard: BusinessCardData = {
@@ -151,14 +162,15 @@ export function App() {
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
-      handleUpdateCards([newCard, ...cards]);
+      setCards([newCard, ...cards]);
+      await createCard(newCard);
     }
   };
 
   // Delete card
-  const handleDeleteCard = (id: string) => {
-    const updated = cards.filter((c) => c.id !== id);
-    handleUpdateCards(updated);
+  const handleDeleteCard = async (id: string) => {
+    setCards(cards.filter((c) => c.id !== id));
+    await deleteCard(id);
   };
 
   // Extract all unique tags
@@ -200,7 +212,6 @@ export function App() {
   const filteredCards = useMemo(() => {
     return cards
       .filter((card) => {
-        // Search query filter
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
           const matchName = card.name.toLowerCase().includes(q);
@@ -216,12 +227,10 @@ export function App() {
           }
         }
 
-        // Tag filter
         if (selectedTag && !card.tags?.includes(selectedTag)) {
           return false;
         }
 
-        // Favorites filter
         if (onlyFavorites && !card.isFavorite) {
           return false;
         }
@@ -235,7 +244,6 @@ export function App() {
         if (sortBy === 'company') {
           return (a.company || '').localeCompare(b.company || '', 'ko');
         }
-        // Latest (createdAt desc)
         return (b.createdAt || 0) - (a.createdAt || 0);
       });
   }, [cards, searchQuery, selectedTag, onlyFavorites, sortBy]);
@@ -252,7 +260,7 @@ export function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setIsInstallModalOpen(true)}
-              className="bg-white text-blue-700 font-bold px-3 py-1 rounded-lg text-xs shadow-sm hover:bg-blue-50 transition active:scale-95"
+              className="bg-white text-blue-700 font-bold px-3 py-1 rounded-lg text-xs shadow-xs hover:bg-blue-50 transition active:scale-95"
             >
               설치하기
             </button>
@@ -273,9 +281,13 @@ export function App() {
         totalCards={cards.length}
         cards={cards}
         myCard={myCard}
-        onImportBackup={(newCards, newMy) => {
-          handleUpdateCards(newCards);
-          if (newMy) handleUpdateMyCard(newMy);
+        onImportBackup={async (newCards, newMy) => {
+          setCards(newCards);
+          if (newMy) setMyCard(newMy);
+          // Sync backup to D1
+          for (const c of newCards) {
+            await createCard(c);
+          }
         }}
         onOpenNewModal={() => {
           setEditingCard(null);
@@ -286,10 +298,10 @@ export function App() {
         onOpenApiKeyModal={() => setIsApiKeyModalOpen(true)}
       />
 
-      {/* Main Content Area - with bottom padding for mobile bottom nav */}
+      {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8 space-y-6 pb-28 md:pb-8">
         {/* Hero Quick Banner / Summary Bar */}
-        <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/80 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/80 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-3.5 sm:gap-4">
             <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-blue-500 text-white flex items-center justify-center font-extrabold text-lg sm:text-xl shadow-md shadow-blue-500/20 shrink-0">
               {myCard.name.slice(0, 1) || 'B'}
@@ -297,8 +309,12 @@ export function App() {
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight truncate">
-                  {myCard.name}님의 명함첩
+                  {myCard.name}님의 클라우드 명함첩
                 </h1>
+                <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-semibold border border-emerald-200 flex items-center gap-1">
+                  <Cloud className="w-3 h-3 text-emerald-600" />
+                  <span>Cloudflare D1 & R2 연동</span>
+                </span>
                 <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 font-semibold border border-blue-100">
                   {cards.length}장 보관 중
                 </span>
@@ -310,18 +326,17 @@ export function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            {!isStandalone && (
-              <button
-                onClick={() => setIsInstallModalOpen(true)}
-                className="hidden sm:flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 transition active:scale-95"
-              >
-                <Download className="w-3.5 h-3.5 text-blue-600" />
-                <span>앱 설치</span>
-              </button>
-            )}
+            <button
+              onClick={syncWithCloud}
+              disabled={isSyncing}
+              title="클라우드 실시간 새로고침"
+              className="p-2.5 rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-600 transition active:scale-95 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-blue-600' : ''}`} />
+            </button>
             <button
               onClick={() => setIsMyCardModalOpen(true)}
-              className="flex-1 sm:flex-initial px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl bg-slate-900 hover:bg-slate-800 text-white transition active:scale-95 shadow-sm text-center"
+              className="flex-1 sm:flex-initial px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl bg-slate-900 hover:bg-slate-800 text-white transition active:scale-95 shadow-xs text-center"
             >
               내 명함 QR
             </button>
@@ -331,7 +346,7 @@ export function App() {
                 setIsEditingMyCard(false);
                 setIsFormModalOpen(true);
               }}
-              className="flex-1 sm:flex-initial px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition active:scale-95 shadow-sm shadow-blue-600/25 flex items-center justify-center gap-1.5"
+              className="flex-1 sm:flex-initial px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition active:scale-95 shadow-md shadow-blue-600/25 flex items-center justify-center gap-1.5"
             >
               <Camera className="w-4 h-4 stroke-[2.5]" />
               <span>명함 스캔 / 등록</span>
@@ -351,7 +366,7 @@ export function App() {
               }}
               className={`px-3.5 py-1.5 rounded-xl font-medium shrink-0 transition ${
                 !selectedTag && !onlyFavorites
-                  ? 'bg-slate-900 text-white shadow-sm'
+                  ? 'bg-slate-900 text-white shadow-xs'
                   : 'bg-white hover:bg-slate-100 text-slate-600 border border-slate-200'
               }`}
             >
@@ -365,7 +380,7 @@ export function App() {
               }}
               className={`px-3.5 py-1.5 rounded-xl font-medium shrink-0 flex items-center gap-1.5 transition ${
                 onlyFavorites
-                  ? 'bg-amber-500 text-white shadow-sm'
+                  ? 'bg-amber-500 text-white shadow-xs'
                   : 'bg-white hover:bg-slate-100 text-slate-600 border border-slate-200'
               }`}
             >
@@ -379,7 +394,7 @@ export function App() {
                 onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
                 className={`px-3 py-1.5 rounded-xl font-medium shrink-0 flex items-center gap-1 transition ${
                   selectedTag === tag
-                    ? 'bg-blue-600 text-white shadow-sm'
+                    ? 'bg-blue-600 text-white shadow-xs'
                     : 'bg-white hover:bg-slate-100 text-slate-600 border border-slate-200'
                 }`}
               >
@@ -451,7 +466,7 @@ export function App() {
             </div>
           ) : (
             /* List View */
-            <div className="bg-white rounded-3xl border border-slate-200/90 overflow-hidden shadow-sm divide-y divide-slate-100">
+            <div className="bg-white rounded-3xl border border-slate-200/90 overflow-hidden shadow-xs divide-y divide-slate-100">
               {filteredCards.map((card) => {
                 const cfg = THEME_CONFIGS[card.theme];
                 return (
@@ -461,9 +476,17 @@ export function App() {
                     className="p-4 sm:px-6 hover:bg-slate-50 transition cursor-pointer flex items-center justify-between gap-4 active:bg-slate-100/70"
                   >
                     <div className="flex items-center gap-3.5 min-w-0">
-                      <div className={`w-11 h-11 rounded-2xl ${cfg.previewBg} text-white flex items-center justify-center font-extrabold text-sm shrink-0 shadow-sm`}>
-                        {card.name.slice(0, 1)}
-                      </div>
+                      {card.avatarUrl ? (
+                        <img
+                          src={card.avatarUrl}
+                          alt={card.name}
+                          className="w-12 h-8 object-cover rounded-lg border border-slate-200 shrink-0 shadow-2xs"
+                        />
+                      ) : (
+                        <div className={`w-10 h-10 rounded-2xl ${cfg.previewBg} text-white flex items-center justify-center font-extrabold text-sm shrink-0 shadow-xs`}>
+                          {card.name.slice(0, 1)}
+                        </div>
+                      )}
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <h4 className="font-bold text-slate-900 text-sm truncate">
@@ -513,7 +536,7 @@ export function App() {
             <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-5">
               {searchQuery || selectedTag || onlyFavorites
                 ? '검색어나 필터를 초기화해 보세요.'
-                : '첫 번째 비즈니스 파트너의 명함을 카메라로 찍어 스마트하게 등록해보세요.'}
+                : '첫 번째 비즈니스 파트너의 명함을 카메라로 찍어 클라우드에 스마트하게 등록해보세요.'}
             </p>
             {searchQuery || selectedTag || onlyFavorites ? (
               <button
@@ -543,13 +566,13 @@ export function App() {
         )}
       </main>
 
-      {/* Footer (Desktop only) */}
+      {/* Footer */}
       <footer className="hidden md:block border-t border-slate-200 bg-white py-6 text-center text-xs text-slate-500 space-y-1">
         <p className="font-semibold text-slate-700">
-          BUCARD · 스마트 명함 관리 웹앱 (bucard.iamchang.me)
+          BUCARD · 클라우드 실시간 동기화 명함 지갑 (bucard.iamchang.me)
         </p>
         <p className="text-slate-400">
-          AI Vision OCR · PWA 오프라인 지원 · React & Cloudflare Pages
+          Cloudflare D1 Database & R2 Storage · Gemini AI Vision · React
         </p>
       </footer>
 
@@ -581,8 +604,8 @@ export function App() {
       <ApiKeyModal
         isOpen={isApiKeyModalOpen}
         onClose={() => setIsApiKeyModalOpen(false)}
-        onSaved={(key) => {
-          console.log('Gemini API Key updated');
+        onSaved={() => {
+          console.log('Gemini API Key saved');
         }}
       />
 
