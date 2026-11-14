@@ -7,7 +7,6 @@ const STORAGE_KEY_GEMINI_API_KEY = 'bucard_gemini_api_key';
 export function getGeminiApiKey(): string {
   const localKey = localStorage.getItem(STORAGE_KEY_GEMINI_API_KEY);
   if (localKey && localKey.trim()) return localKey.trim();
-  // Vite 환경변수 fallback (배포 환경에서 지정된 경우)
   return (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
 }
 
@@ -31,7 +30,6 @@ export interface ExtractedCardInfo {
 
 /**
  * 고해상도 모바일 사진을 브라우저 캔버스를 통해 최적화된 크기(1200px)와 JPEG로 압축합니다.
- * 이를 통해 AI 전송 속도가 1~2초 이내로 대폭 향상됩니다.
  */
 export async function resizeImageToDataUrl(file: File, maxDimension = 1200): Promise<{ dataUrl: string; base64Data: string; mimeType: string }> {
   return new Promise((resolve, reject) => {
@@ -75,8 +73,19 @@ export async function resizeImageToDataUrl(file: File, maxDimension = 1200): Pro
   });
 }
 
+// 지원되는 모델 후보 목록 (최신 2.0 -> 1.5-flash-latest -> 1.5-flash-8b 등 순차 시도)
+const CANDIDATE_MODELS = [
+  'gemini-2.0-flash',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash-002',
+  'gemini-1.5-flash-001',
+  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+];
+
 /**
  * Gemini 비전 모델을 호출하여 명함 사진에서 연락처 정보를 JSON으로 추출합니다.
+ * 계정 권한/버전에 따라 적합한 모델로 자동 폴백합니다.
  */
 export async function extractCardInfoWithGemini(
   base64Image: string,
@@ -86,9 +95,6 @@ export async function extractCardInfoWithGemini(
   if (!apiKey) {
     throw new Error('Gemini API 키가 설정되지 않았습니다.');
   }
-
-  // gemini-2.5-flash 또는 gemini-1.5-flash 모델 사용
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
   const prompt = `
 당신은 대한민국 및 글로벌 비즈니스 명함 판독 최고 전문가입니다.
@@ -130,34 +136,51 @@ export async function extractCardInfoWithGemini(
     }
   };
 
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(requestBody)
-  });
+  let lastError: any = null;
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => null);
-    const msg = errorData?.error?.message || `API 요청 실패 (HTTP ${response.status})`;
-    throw new Error(msg);
+  for (const model of CANDIDATE_MODELS) {
+    try {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        const errMsg = errorData?.error?.message || `HTTP ${response.status}`;
+        lastError = new Error(`[${model}] ${errMsg}`);
+        // If 404 (model not found), continue to next candidate
+        if (response.status === 404 || errMsg.includes('not found')) {
+          console.warn(`Model ${model} not available, trying next candidate...`);
+          continue;
+        }
+        throw lastError;
+      }
+
+      const data = await response.json();
+      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!rawText) {
+        throw new Error('AI 응답에서 텍스트를 추출할 수 없습니다.');
+      }
+
+      const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+      const parsed: ExtractedCardInfo = JSON.parse(cleanJson);
+      return parsed;
+    } catch (err: any) {
+      lastError = err;
+      if (err.message && err.message.includes('not found')) {
+        continue;
+      }
+      // For other serious errors, also try next or throw
+      console.warn(`Error with ${model}:`, err.message);
+    }
   }
 
-  const data = await response.json();
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!rawText) {
-    throw new Error('AI 응답에서 텍스트를 추출할 수 없습니다.');
-  }
-
-  // Parse JSON
-  try {
-    const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-    const parsed: ExtractedCardInfo = JSON.parse(cleanJson);
-    return parsed;
-  } catch (err) {
-    console.error('Failed to parse Gemini response:', rawText);
-    throw new Error('AI 응답을 JSON으로 변환하지 못했습니다. 명함 사진이 선명한지 확인해 주세요.');
-  }
+  throw lastError || new Error('사용 가능한 Gemini 모델을 찾을 수 없습니다.');
 }
