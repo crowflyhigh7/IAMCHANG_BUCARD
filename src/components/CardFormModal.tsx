@@ -1,0 +1,374 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  X, 
+  User, 
+  Building2, 
+  Briefcase, 
+  Phone, 
+  Mail, 
+  Globe, 
+  MapPin, 
+  FileText, 
+  Tag as TagIcon,
+  Palette,
+  Check
+} from 'lucide-react';
+import { BusinessCardData, CardTheme } from '../types/card';
+import { THEME_CONFIGS } from '../utils/theme';
+
+interface CardFormModalProps {
+  initialData?: BusinessCardData | null;
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (card: Omit<BusinessCardData, 'id' | 'createdAt' | 'updatedAt'>, id?: string) => void;
+}
+
+const THEME_OPTIONS: CardTheme[] = [
+  'modern-blue',
+  'slate-dark',
+  'emerald-fresh',
+  'purple-luxury',
+  'sunset-gradient',
+  'minimal-white',
+];
+
+export const CardFormModal: React.FC<CardFormModalProps> = ({
+  initialData,
+  isOpen,
+  onClose,
+  onSave,
+}) => {
+  const [name, setName] = useState('');
+  const [position, setPosition] = useState('');
+  const [company, setCompany] = useState('');
+  const [department, setDepartment] = useState('');
+  const [phone, setPhone] = useState('');
+  const [tel, setTel] = useState('');
+  const [email, setEmail] = useState('');
+  const [website, setWebsite] = useState('');
+  const [address, setAddress] = useState('');
+  const [memo, setMemo] = useState('');
+  const [tagInput, setTagInput] = useState('');
+  const [theme, setTheme] = useState<CardTheme>('modern-blue');
+  const [isFavorite, setIsFavorite] = useState(false);
+
+  useEffect(() => {
+    if (initialData) {
+      setName(initialData.name || '');
+      setPosition(initialData.position || '');
+      setCompany(initialData.company || '');
+      setDepartment(initialData.department || '');
+      setPhone(initialData.phone || '');
+      setTel(initialData.tel || '');
+      setEmail(initialData.email || '');
+      setWebsite(initialData.website || '');
+      setAddress(initialData.address || '');
+      setMemo(initialData.memo || '');
+      setTagInput(initialData.tags?.join(', ') || '');
+      setTheme(initialData.theme || 'modern-blue');
+      setIsFavorite(initialData.isFavorite ?? false);
+    } else {
+      setName('');
+      setPosition('');
+      setCompany('');
+      setDepartment('');
+      setPhone('');
+      setTel('');
+      setEmail('');
+      setWebsite('');
+      setAddress('');
+      setMemo('');
+      setTagInput('');
+      setTheme('modern-blue');
+      setIsFavorite(false);
+    }
+  }, [initialData, isOpen]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      alert('성함을 입력해주세요.');
+      return;
+    }
+
+    const tags = tagInput
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+
+    onSave(
+      {
+        name: name.trim(),
+        position: position.trim(),
+        company: company.trim(),
+        department: department.trim(),
+        phone: phone.trim(),
+        tel: tel.trim(),
+        email: email.trim(),
+        website: website.trim(),
+        address: address.trim(),
+        memo: memo.trim(),
+        tags,
+        theme,
+        isFavorite,
+      },
+      initialData?.id
+    );
+
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
+      <div 
+        className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden my-8 border border-slate-100"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100 bg-slate-50/50">
+          <div>
+            <h2 className="text-xl font-bold text-slate-900">
+              {initialData ? '명함 정보 수정' : '새 명함 등록'}
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              입력하신 정보는 vCard 호환 형식으로 자동 변환 및 저장됩니다.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 transition"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Form Body */}
+        <form onSubmit={handleSubmit} className="p-6 space-y-6 max-h-[75vh] overflow-y-auto">
+          {/* Card Theme Selection */}
+          <div>
+            <label className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+              <Palette className="w-3.5 h-3.5 text-blue-600" />
+              <span>명함 디자인 테마</span>
+            </label>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+              {THEME_OPTIONS.map((thKey) => {
+                const cfg = THEME_CONFIGS[thKey];
+                const isSelected = theme === thKey;
+                return (
+                  <button
+                    key={thKey}
+                    type="button"
+                    onClick={() => setTheme(thKey)}
+                    className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition ${
+                      isSelected
+                        ? 'border-blue-600 ring-2 ring-blue-500/20 bg-blue-50/40'
+                        : 'border-slate-200 hover:border-slate-300 bg-white'
+                    }`}
+                  >
+                    <div className={`w-6 h-6 rounded-lg ${cfg.previewBg} shrink-0 shadow-sm flex items-center justify-center text-white`}>
+                      {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                    </div>
+                    <span className="text-xs font-semibold text-slate-800 truncate">
+                      {cfg.name}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Basic Info */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-2">
+              <User className="w-3.5 h-3.5 text-blue-600" />
+              <span>인적 사항 & 소속</span>
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  이름 <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="예: 홍길동"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  직책 / 역할
+                </label>
+                <input
+                  type="text"
+                  value={position}
+                  onChange={(e) => setPosition(e.target.value)}
+                  placeholder="예: 대표이사, 수석연구원, 팀장"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  회사 / 조직명
+                </label>
+                <input
+                  type="text"
+                  value={company}
+                  onChange={(e) => setCompany(e.target.value)}
+                  placeholder="예: (주)알파테크"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  부서
+                </label>
+                <input
+                  type="text"
+                  value={department}
+                  onChange={(e) => setDepartment(e.target.value)}
+                  placeholder="예: 전략기획실, 개발팀"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Contact Details */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-2">
+              <Phone className="w-3.5 h-3.5 text-blue-600" />
+              <span>연락처 정보</span>
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  휴대폰 번호
+                </label>
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="010-0000-0000"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  유선전화 (사무실)
+                </label>
+                <input
+                  type="tel"
+                  value={tel}
+                  onChange={(e) => setTel(e.target.value)}
+                  placeholder="02-000-0000"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  이메일 주소
+                </label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="name@company.com"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  웹사이트 / 링크
+                </label>
+                <input
+                  type="text"
+                  value={website}
+                  onChange={(e) => setWebsite(e.target.value)}
+                  placeholder="https://company.com"
+                  className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                사무실 주소
+              </label>
+              <input
+                type="text"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="예: 서울특별시 강남구 테헤란로 123"
+                className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+              />
+            </div>
+          </div>
+
+          {/* Tags & Notes */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-2">
+              <TagIcon className="w-3.5 h-3.5 text-blue-600" />
+              <span>태그 및 메모</span>
+            </h3>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                태그 (쉼표로 구분)
+              </label>
+              <input
+                type="text"
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                placeholder="예: 거래처, VIP, 세미나, 개발"
+                className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                미팅 메모 / 주요 사항
+              </label>
+              <textarea
+                rows={3}
+                value={memo}
+                onChange={(e) => setMemo(e.target.value)}
+                placeholder="어디서 만났는지, 어떤 대화를 나누었는지 자유롭게 기록하세요..."
+                className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition resize-none"
+              />
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2.5 text-sm font-semibold rounded-xl text-slate-600 hover:bg-slate-100 transition"
+            >
+              취소
+            </button>
+            <button
+              type="submit"
+              className="px-6 py-2.5 text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/25 transition active:scale-95"
+            >
+              {initialData ? '수정 완료' : '명함 저장'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
