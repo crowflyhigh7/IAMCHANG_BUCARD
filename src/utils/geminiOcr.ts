@@ -29,15 +29,15 @@ export interface ExtractedCardInfo {
 }
 
 /**
- * 고해상도 모바일 사진을 브라우저 캔버스를 통해 최적화된 크기(1200px)와 JPEG로 압축합니다.
+ * 모바일 고해상도 사진을 브라우저 캔버스를 통해 1000px 이내로 리사이징 및 압축합니다.
  */
-export async function resizeImageToDataUrl(file: File, maxDimension = 1200): Promise<{ dataUrl: string; base64Data: string; mimeType: string }> {
+export async function resizeImageToDataUrl(file: File, maxDimension = 1000): Promise<{ dataUrl: string; base64Data: string; mimeType: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = reject;
+    reader.onerror = () => reject(new Error('파일 읽기에 실패했습니다.'));
     reader.onload = () => {
       const img = new Image();
-      img.onerror = reject;
+      img.onerror = () => reject(new Error('이미지 로딩에 실패했습니다.'));
       img.onload = () => {
         let width = img.width;
         let height = img.height;
@@ -63,7 +63,7 @@ export async function resizeImageToDataUrl(file: File, maxDimension = 1200): Pro
 
         ctx.drawImage(img, 0, 0, width, height);
         const mimeType = 'image/jpeg';
-        const dataUrl = canvas.toDataURL(mimeType, 0.85);
+        const dataUrl = canvas.toDataURL(mimeType, 0.8);
         const base64Data = dataUrl.split(',')[1];
         resolve({ dataUrl, base64Data, mimeType });
       };
@@ -73,46 +73,109 @@ export async function resizeImageToDataUrl(file: File, maxDimension = 1200): Pro
   });
 }
 
-// 지원되는 모델 후보 목록 (최신 2.0 -> 1.5-flash-latest -> 1.5-flash-8b 등 순차 시도)
-const CANDIDATE_MODELS = [
-  'gemini-2.0-flash',
-  'gemini-1.5-flash-latest',
-  'gemini-1.5-flash-002',
-  'gemini-1.5-flash-001',
-  'gemini-2.5-flash',
-  'gemini-1.5-flash',
-];
+/**
+ * 타임아웃(기본 20초)이 적용된 fetch 헬퍼
+ */
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 20000): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    clearTimeout(id);
+    return response;
+  } catch (error: any) {
+    clearTimeout(id);
+    if (error.name === 'AbortError') {
+      throw new Error('요청 시간이 초과되었습니다 (20초 타임아웃). 네트워크 연결을 확인해주세요.');
+    }
+    throw error;
+  }
+}
+
+/**
+ * 해당 API 키에서 실제로 사용 가능한 모델을 ListModels API로 즉시 조회합니다.
+ */
+async function findAvailableModel(apiKey: string): Promise<string> {
+  try {
+    const listRes = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+      { method: 'GET' },
+      8000
+    );
+
+    if (listRes.ok) {
+      const data = await listRes.json();
+      const models: any[] = data.models || [];
+
+      // 1순위: generateContent 지원 & flash 모델
+      const flashModel = models.find(
+        (m) =>
+          Array.isArray(m.supportedGenerationMethods) &&
+          m.supportedGenerationMethods.includes('generateContent') &&
+          m.name.includes('flash')
+      );
+      if (flashModel) {
+        return flashModel.name.replace('models/', '');
+      }
+
+      // 2순위: generateContent 지원하는 아무 gemini 모델
+      const anyGemini = models.find(
+        (m) =>
+          Array.isArray(m.supportedGenerationMethods) &&
+          m.supportedGenerationMethods.includes('generateContent') &&
+          m.name.includes('gemini')
+      );
+      if (anyGemini) {
+        return anyGemini.name.replace('models/', '');
+      }
+    }
+  } catch (e) {
+    console.warn('ListModels failed, using fallback list:', e);
+  }
+
+  // fallback 기본값
+  return 'gemini-1.5-flash-latest';
+}
 
 /**
  * Gemini 비전 모델을 호출하여 명함 사진에서 연락처 정보를 JSON으로 추출합니다.
- * 계정 권한/버전에 따라 적합한 모델로 자동 폴백합니다.
  */
 export async function extractCardInfoWithGemini(
   base64Image: string,
   mimeType: string,
-  apiKey: string
+  apiKey: string,
+  onStatusUpdate?: (msg: string) => void
 ): Promise<ExtractedCardInfo> {
   if (!apiKey) {
     throw new Error('Gemini API 키가 설정되지 않았습니다.');
   }
 
+  onStatusUpdate?.('사용 가능한 AI 모델 확인 중...');
+  const targetModel = await findAvailableModel(apiKey);
+  console.log('Selected Gemini Model:', targetModel);
+
+  onStatusUpdate?.(`AI가 명함 정보를 정밀 판독하는 중 (${targetModel})...`);
+
   const prompt = `
-당신은 대한민국 및 글로벌 비즈니스 명함 판독 최고 전문가입니다.
+당신은 명함 판독 최고 전문가입니다.
 제공된 명함 사진에서 글자를 정확하게 인식(OCR)하고 문맥을 파악하여 다음 JSON 스키마에 맞춰 정보를 추출하세요.
 
-반드시 아래 JSON 형식으로만 응답해야 하며, 마크다운 코드블록(\`\`\`json)이나 기타 설명 없이 오직 순수한 JSON만 반환하세요:
+반드시 마크다운이나 기타 텍스트 없이 오직 유효한 순수 JSON만 반환하세요:
 {
   "name": "성명 (반드시 성과 이름 포함)",
   "position": "직책 및 직급 (예: 대표이사, 팀장, 수석연구원, CEO 등. 없으면 빈 문자열)",
-  "company": "회사명/상호명 (예: (주)알파소프트, 네이버 등)",
-  "department": "부서명 (예: 개발본부, 기획실 등. 없으면 빈 문자열)",
-  "phone": "휴대전화번호 (010-XXXX-XXXX 형식으로 정리. 없으면 빈 문자열)",
-  "tel": "대표/사무실 유선전화번호 (지역번호 포함, 없으면 빈 문자열)",
+  "company": "회사명/상호명 (예: (주)알파소프트 등)",
+  "department": "부서명 (없으면 빈 문자열)",
+  "phone": "휴대전화번호 (010-XXXX-XXXX 형식, 없으면 빈 문자열)",
+  "tel": "대표/사무실 유선전화번호 (없으면 빈 문자열)",
   "email": "이메일 주소 (없으면 빈 문자열)",
-  "website": "웹사이트 주소 (http/https 생략 가능, 없으면 빈 문자열)",
-  "address": "사업장 또는 회사 주소 (없으면 빈 문자열)",
-  "memo": "명함에 기재된 슬로건, 주요 취급 품목, 자격사항 등 부가 정보 한 줄 요약 (없으면 빈 문자열)",
-  "tags": ["업종이나 직무와 관련된 추천 키워드 1~3개"]
+  "website": "웹사이트 주소 (없으면 빈 문자열)",
+  "address": "회사/사업장 주소 (없으면 빈 문자열)",
+  "memo": "명함에 적힌 주요 슬로건 또는 업무 요약 (없으면 빈 문자열)",
+  "tags": ["업종이나 직무 관련 추천 키워드 1~3개"]
 }
 `;
 
@@ -136,51 +199,36 @@ export async function extractCardInfoWithGemini(
     }
   };
 
-  let lastError: any = null;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
 
-  for (const model of CANDIDATE_MODELS) {
-    try {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const response = await fetchWithTimeout(
+    endpoint,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    },
+    20000 // 20초 타임아웃
+  );
 
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        const errMsg = errorData?.error?.message || `HTTP ${response.status}`;
-        lastError = new Error(`[${model}] ${errMsg}`);
-        // If 404 (model not found), continue to next candidate
-        if (response.status === 404 || errMsg.includes('not found')) {
-          console.warn(`Model ${model} not available, trying next candidate...`);
-          continue;
-        }
-        throw lastError;
-      }
-
-      const data = await response.json();
-      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (!rawText) {
-        throw new Error('AI 응답에서 텍스트를 추출할 수 없습니다.');
-      }
-
-      const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed: ExtractedCardInfo = JSON.parse(cleanJson);
-      return parsed;
-    } catch (err: any) {
-      lastError = err;
-      if (err.message && err.message.includes('not found')) {
-        continue;
-      }
-      // For other serious errors, also try next or throw
-      console.warn(`Error with ${model}:`, err.message);
-    }
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    const errMsg = errorData?.error?.message || `HTTP ${response.status}`;
+    throw new Error(`AI 판독 실패: ${errMsg}`);
   }
 
-  throw lastError || new Error('사용 가능한 Gemini 모델을 찾을 수 없습니다.');
+  const data = await response.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!rawText) {
+    throw new Error('AI 응답에서 판독 결과를 찾을 수 없습니다.');
+  }
+
+  try {
+    const cleanJson = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    return JSON.parse(cleanJson);
+  } catch (err) {
+    console.error('JSON parse error on text:', rawText);
+    throw new Error('명함 정보를 JSON으로 파싱하지 못했습니다. 다시 촬영해 보세요.');
+  }
 }

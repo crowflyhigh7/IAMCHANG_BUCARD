@@ -109,7 +109,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
   if (!isOpen) return null;
 
-  // AI Camera / Image recognition & R2 cloud upload handler
+  // AI Camera / Image recognition & Cloud upload handler
   const handleImageCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -130,17 +130,14 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       const { dataUrl, base64Data, mimeType } = await resizeImageToDataUrl(file);
       setScannedImagePreview(dataUrl);
 
-      // 2. Upload to Cloudflare R2 in background
-      setScanStatusMessage('Cloudflare R2 스토리지에 사진 저장 및 AI 분석 중...');
-      const uploadPromise = uploadCardImage(base64Data, mimeType);
-      const ocrPromise = extractCardInfoWithGemini(base64Data, mimeType, apiKey);
-
-      const [r2Url, extracted] = await Promise.all([uploadPromise, ocrPromise]);
-
-      // Set permanent R2 image URL
-      if (r2Url) {
-        setScannedImagePreview(r2Url);
-      }
+      // 2. AI 판독 실행 (상태 콜백 포함)
+      setScanStatusMessage('AI 모델에 연결 중...');
+      const extracted = await extractCardInfoWithGemini(
+        base64Data,
+        mimeType,
+        apiKey,
+        (msg) => setScanStatusMessage(msg)
+      );
 
       // Auto-fill form fields
       if (extracted.name) setName(extracted.name);
@@ -157,17 +154,26 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
         setTagInput(extracted.tags.join(', '));
       }
 
-      setScanStatusMessage('분석 및 클라우드 저장 완료!');
+      // 3. Cloudflare R2에 사진 백그라운드 업로드
+      setScanStatusMessage('클라우드에 명함 사진 보관 중...');
+      uploadCardImage(base64Data, mimeType)
+        .then((r2Url) => {
+          if (r2Url) setScannedImagePreview(r2Url);
+        })
+        .catch((err) => console.warn('R2 upload failed, keeping base64:', err));
+
+      setScanStatusMessage('판독 완료! 정보를 확인해주세요.');
       setTimeout(() => {
         setIsScanning(false);
         setScanStatusMessage('');
       }, 1000);
     } catch (err: any) {
-      console.error('OCR or Upload Error:', err);
-      alert(err.message || '명함 처리 중 오류가 발생했습니다.');
+      console.error('OCR Error:', err);
+      alert(err.message || '명함 인식 중 오류가 발생했습니다.');
       setIsScanning(false);
       setScanStatusMessage('');
     } finally {
+      setIsScanning(false);
       e.target.value = '';
     }
   };
@@ -303,11 +309,11 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
           {/* AI Scanning progress status indicator */}
           {isScanning && (
-            <div className="mt-3.5 pt-3 border-t border-blue-200/60 flex items-center gap-3 bg-white/70 p-3 rounded-2xl animate-pulse">
+            <div className="mt-3.5 pt-3 border-t border-blue-200/60 flex items-center gap-3 bg-white/80 p-3 rounded-2xl animate-pulse">
               <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold text-blue-900">{scanStatusMessage}</p>
-                <p className="text-[11px] text-slate-500">잠시만 기다려주세요...</p>
+                <p className="text-[11px] text-slate-500">진행 중입니다 (약 1~3초 소요)...</p>
               </div>
             </div>
           )}
@@ -323,7 +329,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
                 />
                 <span className="text-slate-700 font-semibold flex items-center gap-1">
                   <Check className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>실물 명함 사진이 저장되었습니다</span>
+                  <span>실물 명함 사진이 첨부되었습니다</span>
                 </span>
               </div>
               <button
