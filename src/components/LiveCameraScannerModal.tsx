@@ -8,13 +8,15 @@ import {
   Zap,
   ZapOff,
   AlertCircle,
-  Loader2
+  Loader2,
+  Scan
 } from 'lucide-react';
+import { CropRect } from '../utils/imageCrop';
 
 interface LiveCameraScannerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onCapture: (dataUrl: string) => void;
+  onCapture: (dataUrl: string, guideCropRect?: CropRect) => void;
   onFallbackToFile: () => void;
   onFallbackToNativeCamera?: () => void;
 }
@@ -36,7 +38,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   const [permissionError, setPermissionError] = useState<string | null>(null);
 
   // Auto-capture states
-  const [isCardAligned, setIsCardAligned] = useState(false);
+  const [focusState, setFocusState] = useState<'searching' | 'focusing' | 'locked'>('searching');
   const [alignProgress, setAlignProgress] = useState(0); // 0 to 100%
   const [isCapturing, setIsCapturing] = useState(false);
   const [isFlashActive, setIsFlashActive] = useState(false);
@@ -46,18 +48,22 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   // Debug metric display for instant troubleshooting
   const [debugMetric, setDebugMetric] = useState<string>('');
 
-  // Animation frame ref & Hysteresis stability tracker
+  // Tap-to-focus animation state
+  const [focusRing, setFocusRing] = useState<{ x: number; y: number } | null>(null);
+
+  // Tracking refs
   const animFrameId = useRef<number | null>(null);
   const lastCheckTime = useRef<number>(0);
   const stabilityRef = useRef<number>(0); // 0.0 to 1.0 (smooth accumulator)
+  const prevFrameLumRef = useRef<Float32Array | null>(null);
 
-  // 1. 카메라 시작 (streamRef 보관 및 단 1회 실행 보장)
+  // 1. 카메라 시작 (연속 자동 초점 focusMode: continuous 적용)
   const startCamera = useCallback(async () => {
     try {
       setIsLoadingCamera(true);
       setPermissionError(null);
 
-      // 이미 스트림이 열려 있다면 재사용
+      // 이미 활성 스트림이 있다면 재사용
       if (streamRef.current && streamRef.current.active) {
         setIsLoadingCamera(false);
         setHasPermission(true);
@@ -70,7 +76,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
 
       let mediaStream: MediaStream | null = null;
 
-      // 1차: 후면 카메라 + 고화질 ideal
+      // 1차: 후면 카메라 + 고해상도(1080p ideal)
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
           video: {
@@ -122,12 +128,22 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
         }
       }
 
-      // Torch (플래시) 지원 확인
+      // 비디오 트랙 고급 제어 (플래시 확인 & 연속 자동초점 모드 활성화)
       const videoTrack = mediaStream.getVideoTracks()[0];
       if (videoTrack) {
-        const capabilities = (videoTrack.getCapabilities?.() as any) || {};
-        if (capabilities.torch) {
-          setHasTorch(true);
+        try {
+          const capabilities = (videoTrack.getCapabilities?.() as any) || {};
+          if (capabilities.torch) {
+            setHasTorch(true);
+          }
+          // 모바일 브라우저에 연속 자동초점(continuous auto-focus) 요청
+          if (capabilities.focusMode && Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous')) {
+            await (videoTrack as any).applyConstraints({
+              advanced: [{ focusMode: 'continuous' }]
+            });
+          }
+        } catch (capErr) {
+          console.warn('Track constraint application failed:', capErr);
         }
       }
     } catch (err: any) {
@@ -142,7 +158,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     }
   }, []);
 
-  // 2. 카메라 정리 (빈 의존성 배열로 리렌더링 시 함수 재정의 절대 방지)
+  // 2. 카메라 정리
   const stopCamera = useCallback(() => {
     if (animFrameId.current) {
       cancelAnimationFrame(animFrameId.current);
@@ -158,11 +174,34 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       videoRef.current.srcObject = null;
     }
     stabilityRef.current = 0;
-    setIsCardAligned(false);
+    prevFrameLumRef.current = null;
+    setFocusState('searching');
     setAlignProgress(0);
     setIsLoadingCamera(false);
     setIsTorchOn(false);
   }, []);
+
+  // 화면 터치로 초점 다시 맞추기 (Tap to Focus)
+  const handleTouchFocus = async (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : (e as React.MouseEvent).clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : (e as React.MouseEvent).clientY;
+
+    setFocusRing({ x: clientX - rect.left, y: clientY - rect.top });
+    setTimeout(() => setFocusRing(null), 1200);
+
+    if (streamRef.current) {
+      const track = streamRef.current.getVideoTracks()[0];
+      if (track) {
+        try {
+          const caps = (track.getCapabilities?.() as any) || {};
+          if (caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+            await (track as any).applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+          }
+        } catch (_) {}
+      }
+    }
+  };
 
   // 플래시 토글
   const toggleTorch = async () => {
@@ -211,12 +250,45 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedDataUrl = canvas.toDataURL('image/jpeg', 0.94);
 
+    // 뷰파인더 가이드라인의 정확한 정규화 사각영역(CropRect) 계산
+    let guideCropRect: CropRect | undefined;
+    const guide = guideBoxRef.current;
+    if (guide) {
+      const videoRect = video.getBoundingClientRect();
+      const guideRect = guide.getBoundingClientRect();
+      const W_screen = videoRect.width;
+      const H_screen = videoRect.height;
+      const W_vid = video.videoWidth || 1920;
+      const H_vid = video.videoHeight || 1080;
+
+      const scale = Math.max(W_screen / W_vid, H_screen / H_vid);
+      const renderedW = W_vid * scale;
+      const renderedH = H_vid * scale;
+      const offsetX = (W_screen - renderedW) / 2;
+      const offsetY = (H_screen - renderedH) / 2;
+
+      const guideXonScreen = guideRect.left - videoRect.left;
+      const guideYonScreen = guideRect.top - videoRect.top;
+
+      const srcX = Math.max(0, Math.round((guideXonScreen - offsetX) / scale));
+      const srcY = Math.max(0, Math.round((guideYonScreen - offsetY) / scale));
+      const srcW = Math.min(W_vid - srcX, Math.round(guideRect.width / scale));
+      const srcH = Math.min(H_vid - srcY, Math.round(guideRect.height / scale));
+
+      guideCropRect = {
+        x: Math.max(0, Math.min(0.9, srcX / W_vid)),
+        y: Math.max(0, Math.min(0.9, srcY / H_vid)),
+        width: Math.max(0.1, Math.min(1, srcW / W_vid)),
+        height: Math.max(0.1, Math.min(1, srcH / H_vid)),
+      };
+    }
+
     stopCamera();
-    onCapture(capturedDataUrl);
+    onCapture(capturedDataUrl, guideCropRect);
     setIsCapturing(false);
   }, [isCapturing, onCapture, stopCamera]);
 
-  // 4. 모달 열림/닫힘 생명주기 (오직 isOpen에만 의존하여 무한 재시작 루프 100% 방지)
+  // 4. 모달 열림/닫힘 생명주기
   useEffect(() => {
     if (isOpen) {
       startCamera();
@@ -228,7 +300,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     };
   }, [isOpen, startCamera, stopCamera]);
 
-  // 5. 실시간 가이드라인 정렬 및 손떨림 감지 루프
+  // 5. 실시간 초점(Sharpness) 및 손떨림 안정성 정밀 감지 루프
   useEffect(() => {
     if (!isOpen || !hasPermission) return;
 
@@ -270,9 +342,9 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           const srcW = Math.min(W_vid - srcX, Math.round(guideRect.width / scale));
           const srcH = Math.min(H_vid - srcY, Math.round(guideRect.height / scale));
 
-          // 80x48 크기로 다운샘플링하여 빠른 안정성 분석
-          const sampleW = 80;
-          const sampleH = 48;
+          // 100x60 크기로 다운샘플링하여 초고속 분석 (비용 0.2ms 미만)
+          const sampleW = 100;
+          const sampleH = 60;
           const canvas = canvasRef.current || document.createElement('canvas');
           canvas.width = sampleW;
           canvas.height = sampleH;
@@ -288,51 +360,101 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
               return (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
             };
 
-            // 가이드라인 내부의 평균 밝기 및 텍스트 대비(표준편차) 측정
-            let sum = 0;
-            let count = 0;
-            const values: number[] = [];
+            // A. 평균 밝기 측정 (명함 종이 유무)
+            let sumB = 0;
+            let countB = 0;
+            for (let y = 6; y < sampleH - 6; y += 3) {
+              for (let x = 6; x < sampleW - 6; x += 3) {
+                sumB += getB(x, y);
+                countB++;
+              }
+            }
+            const avgBrightness = Math.round(sumB / Math.max(1, countB));
 
-            for (let y = 6; y < sampleH - 6; y += 4) {
-              for (let x = 6; x < sampleW - 6; x += 4) {
-                const b = getB(x, y);
-                sum += b;
-                values.push(b);
-                count++;
+            // B. 고주파 엣지 그래디언트(초점 선명도) 측정
+            // 외곽 테두리 제외한 내부 글자/로고 영역(15% ~ 85%)만 샘플링
+            const minX = Math.round(sampleW * 0.15);
+            const maxX = Math.round(sampleW * 0.85);
+            const minY = Math.round(sampleH * 0.15);
+            const maxY = Math.round(sampleH * 0.85);
+
+            let edgeSum = 0;
+            let edgeCount = 0;
+            let sharpEdgeCount = 0; // 글자 경계의 강한 엣지 픽셀 수
+
+            for (let y = minY; y <= maxY; y += 2) {
+              for (let x = minX; x <= maxX; x += 2) {
+                const gx = Math.abs(getB(x + 1, y) - getB(x - 1, y));
+                const gy = Math.abs(getB(x, y + 1) - getB(x, y - 1));
+                const grad = gx + gy;
+                edgeSum += grad;
+                if (grad >= 22) {
+                  sharpEdgeCount++;
+                }
+                edgeCount++;
+              }
+            }
+            const sharpness = Math.round((edgeSum / Math.max(1, edgeCount)) * 10) / 10;
+
+            // C. 이전 프레임 대비 변화량 (손떨림 및 카메라 이동 감지)
+            const currentLum = new Float32Array(sampleW * sampleH);
+            for (let y = 0; y < sampleH; y++) {
+              for (let x = 0; x < sampleW; x++) {
+                currentLum[y * sampleW + x] = getB(x, y);
               }
             }
 
-            const avgBrightness = Math.round(sum / Math.max(1, count));
-            let variance = 0;
-            for (const val of values) {
-              variance += Math.pow(val - avgBrightness, 2);
+            let motionDiff = 0;
+            if (prevFrameLumRef.current && prevFrameLumRef.current.length === sampleW * sampleH) {
+              let diffSum = 0;
+              let diffCount = 0;
+              for (let i = 0; i < sampleW * sampleH; i += 6) {
+                diffSum += Math.abs(currentLum[i] - prevFrameLumRef.current[i]);
+                diffCount++;
+              }
+              motionDiff = diffCount > 0 ? diffSum / diffCount : 0;
             }
-            const stdDev = Math.round(Math.sqrt(variance / Math.max(1, count)));
+            prevFrameLumRef.current = currentLum;
 
-            // 명함 존재 판정: 밝기 > 80 (일반 실내 조명), 표준편차 > 4 (글자/대비 존재)
-            const isCardPresent = avgBrightness > 80 && stdDev > 4;
+            // D. 다단계 종합 판정
+            // 1) 명함 종이 존재: 어두운 배경(책상 등) 대비 밝기 > 75
+            const isCardPresent = avgBrightness > 75;
 
-            // Hysteresis 필터링 (부드러운 누적 및 감쇠)
-            if (isCardPresent) {
-              stabilityRef.current = Math.min(1.0, stabilityRef.current + 0.25);
+            // 2) 초점 선명도 판정:
+            // 글자 엣지(sharpEdgeCount)가 12개 이상이거나 평균 그래디언트 >= 11
+            const isSharp = sharpness >= 11 || sharpEdgeCount >= 12;
+
+            // 3) 손떨림 방지: 프레임 간 변위가 7.0 미만으로 고정된 상태
+            const isStill = motionDiff < 7.0;
+
+            // E. 초점 및 정렬 상태 전이
+            if (!isCardPresent) {
+              // 명함이 가이드라인 안에 없음
+              setFocusState('searching');
+              stabilityRef.current = Math.max(0.0, stabilityRef.current - 0.25);
+            } else if (!isSharp || !isStill) {
+              // 명함은 들어왔으나 아직 렌즈가 초점을 잡는 중이거나 손이 떨리는 중
+              setFocusState('focusing');
+              // 초점이 덜 맞았을 때는 자동 촬영으로 바로 넘어가지 않도록 게이지를 20% 이내로 홀드
+              if (stabilityRef.current > 0.25) {
+                stabilityRef.current = Math.max(0.15, stabilityRef.current - 0.1);
+              } else {
+                stabilityRef.current = Math.min(0.2, stabilityRef.current + 0.04);
+              }
             } else {
-              stabilityRef.current = Math.max(0.0, stabilityRef.current - 0.1);
+              // 초점이 뚜렷하게 잡히고 손이 멈춘 상태 (고화질 촬영 조건 충족!)
+              setFocusState('locked');
+              // 0.8초 ~ 1.0초간 흔들림 없이 유지되어야 100% 도달 (+0.12씩 누적)
+              stabilityRef.current = Math.min(1.0, stabilityRef.current + 0.12);
             }
 
             const currentScore = stabilityRef.current;
             const progress = Math.round(currentScore * 100);
             setAlignProgress(progress);
-            setDebugMetric(`밝기:${avgBrightness} | 대비:${stdDev} | 안정:${progress}%`);
+            setDebugMetric(`초점:${sharpness}(엣지:${sharpEdgeCount}) | 모션:${motionDiff.toFixed(1)} | 안정:${progress}%`);
 
-            // 상태 전환 히스테리시스 (깜빡임 차단)
-            if (currentScore >= 0.25) {
-              setIsCardAligned(true);
-            } else if (currentScore <= 0.05) {
-              setIsCardAligned(false);
-            }
-
-            // 90% 이상 도달 시 찰칵 자동 촬영 발동!
-            if (currentScore >= 0.9) {
+            // F. 95% 이상 안정성 도달 시 찰칵 자동 촬영 발동! (초점이 100% 선명할 때만 찍힘)
+            if (currentScore >= 0.95) {
               triggerCapture();
               return;
             }
@@ -371,7 +493,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           </div>
           <div>
             <span className="text-sm font-bold tracking-tight">스마트 명함 스캐너</span>
-            <p className="text-[10px] text-slate-300">가이드라인에 맞추면 자동 촬영됩니다.</p>
+            <p className="text-[10px] text-slate-300">초점이 선명하게 맞으면 자동으로 촬영됩니다.</p>
           </div>
         </div>
 
@@ -402,10 +524,13 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       </div>
 
       {/* Center Camera Viewport */}
-      <div className="relative flex-1 w-full min-h-0 flex items-center justify-center overflow-hidden">
+      <div 
+        onClick={handleTouchFocus}
+        className="relative flex-1 w-full min-h-0 flex items-center justify-center overflow-hidden cursor-crosshair"
+      >
         {/* Loading Spinner */}
         {isLoadingCamera && !permissionError && (
-          <div className="absolute z-20 flex flex-col items-center gap-3 text-white">
+          <div className="absolute z-20 flex flex-col items-center gap-3 text-white pointer-events-none">
             <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
             <p className="text-xs font-semibold text-slate-200">카메라 렌즈를 연결하는 중입니다...</p>
           </div>
@@ -420,9 +545,17 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           className="absolute inset-0 w-full h-full object-cover z-0"
         />
 
+        {/* Tap to focus touch ripple ring */}
+        {focusRing && (
+          <div
+            style={{ left: focusRing.x - 24, top: focusRing.y - 24 }}
+            className="absolute z-30 w-12 h-12 rounded-full border-2 border-amber-300 animate-ping pointer-events-none shadow-lg shadow-amber-300/40"
+          />
+        )}
+
         {/* Permission Error fallback banner */}
         {permissionError && (
-          <div className="relative z-40 max-w-sm mx-4 p-6 rounded-3xl bg-slate-900/95 border border-slate-700 text-white text-center space-y-4 shadow-2xl backdrop-blur-md animate-fade-in">
+          <div className="relative z-40 max-w-sm mx-4 p-6 rounded-3xl bg-slate-900/95 border border-slate-700 text-white text-center space-y-4 shadow-2xl backdrop-blur-md animate-fade-in pointer-events-auto">
             <div className="w-14 h-14 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
               <AlertCircle className="w-7 h-7" />
             </div>
@@ -469,31 +602,33 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
                   width: 'min(86vw, 420px)',
                   aspectRatio: '1.68 / 1', // 표준 명함 비율 (90mm x 54mm)
                 }}
-                className={`relative rounded-3xl border-[3px] transition-colors duration-200 ${
-                  isCardAligned
-                    ? 'border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.65),0_0_25px_rgba(52,211,153,0.5)]'
+                className={`relative rounded-3xl border-[3px] transition-all duration-200 ${
+                  focusState === 'locked'
+                    ? 'border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.65),0_0_25px_rgba(52,211,153,0.5)] scale-[1.01]'
+                    : focusState === 'focusing'
+                    ? 'border-amber-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.65),0_0_20px_rgba(251,191,36,0.35)]'
                     : 'border-white/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.6)]'
                 }`}
               >
                 {/* 4 Corner Accents */}
                 <div className={`absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 rounded-tl-xl transition-colors duration-200 ${
-                  isCardAligned ? 'border-emerald-300' : 'border-blue-400'
+                  focusState === 'locked' ? 'border-emerald-300' : focusState === 'focusing' ? 'border-amber-300' : 'border-blue-400'
                 }`} />
                 <div className={`absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 rounded-tr-xl transition-colors duration-200 ${
-                  isCardAligned ? 'border-emerald-300' : 'border-blue-400'
+                  focusState === 'locked' ? 'border-emerald-300' : focusState === 'focusing' ? 'border-amber-300' : 'border-blue-400'
                 }`} />
                 <div className={`absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 rounded-bl-xl transition-colors duration-200 ${
-                  isCardAligned ? 'border-emerald-300' : 'border-blue-400'
+                  focusState === 'locked' ? 'border-emerald-300' : focusState === 'focusing' ? 'border-amber-300' : 'border-blue-400'
                 }`} />
                 <div className={`absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 rounded-br-xl transition-colors duration-200 ${
-                  isCardAligned ? 'border-emerald-300' : 'border-blue-400'
+                  focusState === 'locked' ? 'border-emerald-300' : focusState === 'focusing' ? 'border-amber-300' : 'border-blue-400'
                 }`} />
 
-                {/* Auto-shutter progress bar (when aligned) */}
+                {/* Auto-shutter progress bar (when aligned & focused) */}
                 <div className="absolute top-0 left-0 right-0 h-1.5 bg-black/40 rounded-t-2xl overflow-hidden">
                   <div
                     className={`h-full transition-all duration-100 ease-out ${
-                      isCardAligned ? 'bg-emerald-400' : 'bg-transparent'
+                      focusState === 'locked' ? 'bg-emerald-400' : focusState === 'focusing' ? 'bg-amber-400' : 'bg-transparent'
                     }`}
                     style={{ width: `${alignProgress}%` }}
                   />
@@ -502,16 +637,23 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
                 {/* Center Status Badge */}
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div
-                    className={`px-4 py-2 rounded-full text-xs font-bold backdrop-blur-md transition-colors duration-200 flex items-center gap-1.5 shadow-lg ${
-                      isCardAligned
-                        ? 'bg-emerald-600 text-white'
+                    className={`px-4 py-2 rounded-full text-xs font-bold backdrop-blur-md transition-all duration-200 flex items-center gap-1.5 shadow-lg ${
+                      focusState === 'locked'
+                        ? 'bg-emerald-600 text-white ring-2 ring-emerald-300/40'
+                        : focusState === 'focusing'
+                        ? 'bg-amber-600/90 text-white ring-2 ring-amber-300/30'
                         : 'bg-black/60 text-white/90 border border-white/20'
                     }`}
                   >
-                    {isCardAligned ? (
+                    {focusState === 'locked' ? (
                       <>
                         <Check className="w-3.5 h-3.5 stroke-[3]" />
-                        <span>명함 감지 중... 고정해주세요 ({alignProgress}%)</span>
+                        <span>초점 고정 완료! 가만히 계세요 ({alignProgress}%)</span>
+                      </>
+                    ) : focusState === 'focusing' ? (
+                      <>
+                        <Scan className="w-3.5 h-3.5 text-amber-200 animate-pulse" />
+                        <span>초점을 맞추는 중입니다... 흔들리지 마세요</span>
                       </>
                     ) : (
                       <>
@@ -525,7 +667,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
                 {/* Live Real-time Debug Metric Pill */}
                 {debugMetric && (
                   <div className="absolute -bottom-8 left-0 right-0 flex justify-center">
-                    <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-black/60 text-emerald-300 backdrop-blur-xs">
+                    <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-black/60 text-slate-300 backdrop-blur-xs">
                       {debugMetric}
                     </span>
                   </div>
@@ -561,10 +703,10 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           title="사진 촬영"
         >
           <div className={`w-18 h-18 sm:w-20 sm:h-20 rounded-full border-4 border-white transition flex items-center justify-center ${
-            isCardAligned ? 'bg-emerald-500 text-white' : 'bg-white hover:bg-slate-100 text-slate-900'
+            focusState === 'locked' ? 'bg-emerald-500 text-white' : 'bg-white hover:bg-slate-100 text-slate-900'
           }`}>
             <div className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full border-2 border-slate-900/10 transition ${
-              isCardAligned ? 'bg-emerald-400' : 'bg-white'
+              focusState === 'locked' ? 'bg-emerald-400' : 'bg-white'
             }`} />
           </div>
         </button>

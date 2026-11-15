@@ -235,7 +235,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
   };
 
   // 3단계: 실시간 카메라 스캐너에서 촬영되었을 때 (자동 또는 수동 셔터)
-  const handleLiveCameraCapture = async (dataUrl: string) => {
+  const handleLiveCameraCapture = async (dataUrl: string, guideCropRect?: CropRect) => {
     setIsLiveCameraOpen(false);
     setRawPhotoDataUrl(dataUrl);
     setIsScanning(true);
@@ -244,7 +244,14 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
     const img = new Image();
     img.onload = async () => {
       try {
-        const bounds = detectCardBounds(img);
+        let bounds = detectCardBounds(img);
+        // 자동 감지 결과가 명함 표준 비율(1.1 ~ 2.4)을 벗어나면 뷰파인더 가이드라인 사각좌표로 보정
+        if (guideCropRect) {
+          const aspect = (bounds.width * img.width) / Math.max(1, bounds.height * img.height);
+          if (aspect < 1.1 || aspect > 2.4 || bounds.width < 0.25 || bounds.height < 0.15) {
+            bounds = guideCropRect;
+          }
+        }
         setDetectedCropRect(bounds);
         const { croppedDataUrl, croppedBase64 } = await cropImageByRect(dataUrl, bounds);
         await processCroppedImage(croppedDataUrl, croppedBase64);
