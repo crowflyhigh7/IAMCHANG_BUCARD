@@ -7,7 +7,8 @@ import {
   RotateCcw,
   Zap,
   ZapOff,
-  AlertCircle
+  AlertCircle,
+  Loader2
 } from 'lucide-react';
 
 interface LiveCameraScannerModalProps {
@@ -15,6 +16,7 @@ interface LiveCameraScannerModalProps {
   onClose: () => void;
   onCapture: (dataUrl: string) => void;
   onFallbackToFile: () => void;
+  onFallbackToNativeCamera?: () => void;
 }
 
 export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
@@ -22,12 +24,14 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   onClose,
   onCapture,
   onFallbackToFile,
+  onFallbackToNativeCamera,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const guideBoxRef = useRef<HTMLDivElement>(null);
 
   const [stream, setStream] = useState<MediaStream | null>(null);
+  const [isLoadingCamera, setIsLoadingCamera] = useState(true);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [permissionError, setPermissionError] = useState<string | null>(null);
 
@@ -44,29 +48,68 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   const lastCheckTime = useRef<number>(0);
   const alignedFrameCount = useRef<number>(0);
 
-  // 1. 카메라 시작
+  // 1. 카메라 시작 (다단계 제약조건 폴백으로 100% 연결 보장)
   const startCamera = useCallback(async () => {
     try {
+      setIsLoadingCamera(true);
       setPermissionError(null);
-      // 모바일 후면 카메라 우선 요청
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920, min: 1280 },
-          height: { ideal: 1080, min: 720 },
-        },
-        audio: false,
-      };
 
-      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('이 브라우저는 웹 실시간 카메라 스트리밍을 지원하지 않습니다.');
+      }
+
+      let mediaStream: MediaStream | null = null;
+
+      // 1차 시도: 후면 카메라 + 고화질 ideal (min 제약조건을 제거하여 portrait 회전 에러 방지)
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+      } catch (e1) {
+        console.warn('Primary camera constraints failed, trying fallback 1:', e1);
+        try {
+          // 2차 시도: 기본 후면 카메라
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' },
+            audio: false,
+          });
+        } catch (e2) {
+          console.warn('Fallback 1 failed, trying fallback 2 (any video):', e2);
+          // 3차 시도: 기본 시스템 카메라 (데스크톱 웹캠 등)
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
+      }
+
+      if (!mediaStream) {
+        throw new Error('카메라 스트림을 획득할 수 없습니다.');
+      }
+
       setStream(mediaStream);
       setHasPermission(true);
+      setIsLoadingCamera(false);
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().catch(console.warn);
-        };
+      const video = videoRef.current;
+      if (video) {
+        video.srcObject = mediaStream;
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('webkit-playsinline', 'true');
+        video.muted = true;
+        try {
+          await video.play();
+        } catch (playErr) {
+          console.warn('Video play error, retrying on loadedmetadata:', playErr);
+          video.onloadedmetadata = () => {
+            video.play().catch(console.warn);
+          };
+        }
       }
 
       // Torch (플래시) 지원 확인
@@ -79,11 +122,12 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       }
     } catch (err: any) {
       console.warn('Camera access failed:', err);
+      setIsLoadingCamera(false);
       setHasPermission(false);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setPermissionError('카메라 사용 권한이 거부되었습니다. 브라우저 설정에서 카메라 권한을 허용해주세요.');
+        setPermissionError('카메라 사용 권한이 차단되었습니다. 브라우저 주소창 좌측의 설정/자물쇠 아이콘을 눌러 카메라 권한을 허용해주세요.');
       } else {
-        setPermissionError('카메라를 시작할 수 없습니다. 앨범 사진 선택을 이용해주세요.');
+        setPermissionError(err.message || '카메라를 시작할 수 없습니다. 기본 카메라 앱으로 촬영해주세요.');
       }
     }
   }, []);
@@ -101,6 +145,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     alignedFrameCount.current = 0;
     setIsCardAligned(false);
     setAlignProgress(0);
+    setIsLoadingCamera(false);
   }, [stream]);
 
   // 플래시 토글
@@ -125,7 +170,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     if (isCapturing || !videoRef.current) return;
     setIsCapturing(true);
 
-    // 플래시 효과 애니메이션
+    // 플래시 효과 애니메이션 & 진동
     setIsFlashActive(true);
     if (navigator.vibrate) {
       try { navigator.vibrate(60); } catch (_) {}
@@ -165,7 +210,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       if (!isRunning) return;
 
       const now = performance.now();
-      // 약 100ms마다 한 번씩 분석 (초당 10회 검사로 배터리 및 부하 최소화)
+      // 약 100ms마다 한 번씩 분석 (초당 10회 검사)
       if (now - lastCheckTime.current >= 100) {
         lastCheckTime.current = now;
 
@@ -182,7 +227,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           const guideRelWidth = guideRect.width / videoRect.width;
           const guideRelHeight = guideRect.height / videoRect.height;
 
-          // 오프스크린 캔버스에 가이드 영역 주변을 작게 샘플링 (120x70)
+          // 오프스크린 캔버스에 가이드 영역 주변을 샘플링 (120x70)
           const sampleW = 120;
           const sampleH = 70;
           const canvas = canvasRef.current || document.createElement('canvas');
@@ -194,7 +239,6 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
             const vidW = video.videoWidth;
             const vidH = video.videoHeight;
 
-            // 가이드라인 박스 영역에 해당하는 비디오 프레임 추출
             const srcX = Math.max(0, guideRelLeft * vidW);
             const srcY = Math.max(0, guideRelTop * vidH);
             const srcW = Math.min(vidW - srcX, guideRelWidth * vidW);
@@ -205,7 +249,6 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
               const imgData = ctx.getImageData(0, 0, sampleW, sampleH);
               const data = imgData.data;
 
-              // 밝기 계산 헬퍼
               const getB = (x: number, y: number) => {
                 const i = (y * sampleW + x) * 4;
                 return (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
@@ -223,16 +266,13 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
               const innerAvg = innerSum / Math.max(1, innerCount);
 
               // 2) 가이드라인 안쪽 테두리 밝기 (명함 종이가 꽉 찼는지 확인)
-              // 상/하/좌/우 4변 내부 10% 지점 확인
               let borderSum = 0;
               let borderCount = 0;
-              // 상하 안쪽 변
               for (let x = 10; x < sampleW - 10; x += 8) {
                 borderSum += getB(x, 6);
                 borderSum += getB(x, sampleH - 7);
                 borderCount += 2;
               }
-              // 좌우 안쪽 변
               for (let y = 8; y < sampleH - 8; y += 6) {
                 borderSum += getB(6, y);
                 borderSum += getB(sampleW - 7, y);
@@ -240,20 +280,17 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
               }
               const borderAvg = borderSum / Math.max(1, borderCount);
 
-              // 명함이 가이드라인 박스를 거의 채우고 있는지 조건 판정:
-              // - 중앙부가 충분히 밝거나(>115) 테두리와의 밝기가 고르게 채워짐
-              // - 편차가 너무 크지 않고 안정적일 때
-              const isFilled = innerAvg > 110 && borderAvg > 95 && Math.abs(innerAvg - borderAvg) < 55;
+              // 명함이 가이드라인 박스를 채우고 있는지 조건 판정
+              const isFilled = innerAvg > 105 && borderAvg > 90 && Math.abs(innerAvg - borderAvg) < 60;
 
               if (isFilled) {
                 alignedFrameCount.current += 1;
                 setIsCardAligned(true);
-                // 5프레임(약 0.5초) 유지되면 100% 도달
                 const progress = Math.min(100, Math.round((alignedFrameCount.current / 5) * 100));
                 setAlignProgress(progress);
 
                 if (alignedFrameCount.current >= 5) {
-                  // 자동 셔터 촬영 발동!
+                  // 자동 셔터 발동!
                   triggerCapture();
                   return;
                 }
@@ -305,7 +342,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       )}
 
       {/* Top Header Bar */}
-      <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between p-4 sm:p-6 bg-gradient-to-b from-black/80 via-black/40 to-transparent text-white pt-safe">
+      <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between p-4 sm:p-6 bg-gradient-to-b from-black/85 via-black/40 to-transparent text-white pt-safe">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-full bg-blue-600/90 flex items-center justify-center backdrop-blur-md shadow-md">
             <Camera className="w-4 h-4 text-white" />
@@ -344,6 +381,14 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
 
       {/* Center Camera Viewport */}
       <div className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden">
+        {/* Loading Spinner */}
+        {isLoadingCamera && !permissionError && (
+          <div className="absolute z-20 flex flex-col items-center gap-3 text-white">
+            <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+            <p className="text-xs font-semibold text-slate-200">카메라를 시작하는 중입니다...</p>
+          </div>
+        )}
+
         {/* Live Camera Video */}
         <video
           ref={videoRef}
@@ -355,30 +400,37 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
 
         {/* Permission Error fallback banner */}
         {permissionError && (
-          <div className="relative z-40 max-w-sm mx-4 p-5 rounded-3xl bg-slate-900/95 border border-slate-700 text-white text-center space-y-4 shadow-2xl backdrop-blur-md">
-            <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
-              <AlertCircle className="w-6 h-6" />
+          <div className="relative z-40 max-w-sm mx-4 p-6 rounded-3xl bg-slate-900/95 border border-slate-700 text-white text-center space-y-4 shadow-2xl backdrop-blur-md animate-fade-in">
+            <div className="w-14 h-14 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
+              <AlertCircle className="w-7 h-7" />
             </div>
             <div>
-              <h4 className="text-base font-bold">카메라 연결 불가</h4>
-              <p className="text-xs text-slate-300 mt-1">{permissionError}</p>
+              <h4 className="text-base font-bold">카메라 연결 안내</h4>
+              <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">{permissionError}</p>
             </div>
-            <div className="flex flex-col gap-2 pt-2">
+            <div className="flex flex-col gap-2.5 pt-2">
+              {onFallbackToNativeCamera && (
+                <button
+                  onClick={() => {
+                    stopCamera();
+                    onClose();
+                    onFallbackToNativeCamera();
+                  }}
+                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition shadow-md shadow-blue-600/30 flex items-center justify-center gap-2"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>스마트폰 기본 카메라로 촬영</span>
+                </button>
+              )}
               <button
                 onClick={() => {
                   stopCamera();
                   onClose();
                   onFallbackToFile();
                 }}
-                className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition shadow-md shadow-blue-600/30"
+                className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition"
               >
                 사진 앨범에서 선택하기
-              </button>
-              <button
-                onClick={startCamera}
-                className="w-full py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
-              >
-                다시 시도
               </button>
             </div>
           </div>
@@ -486,10 +538,27 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           </div>
         </button>
 
-        {/* Empty placeholder for symmetry */}
-        <div className="min-w-[70px] flex flex-col items-center gap-1 opacity-0 pointer-events-none">
-          <div className="w-11 h-11 rounded-full" />
-        </div>
+        {/* Fallback to Native Device Camera */}
+        {onFallbackToNativeCamera ? (
+          <button
+            onClick={() => {
+              stopCamera();
+              onClose();
+              onFallbackToNativeCamera();
+            }}
+            className="flex flex-col items-center gap-1 text-slate-300 hover:text-white transition active:scale-95 text-center min-w-[70px]"
+            title="기본 카메라 앱"
+          >
+            <div className="w-11 h-11 rounded-full bg-white/15 backdrop-blur-md flex items-center justify-center border border-white/20">
+              <Camera className="w-5 h-5 text-white" />
+            </div>
+            <span className="text-[11px] font-medium">기본 앱</span>
+          </button>
+        ) : (
+          <div className="min-w-[70px] flex flex-col items-center gap-1 opacity-0 pointer-events-none">
+            <div className="w-11 h-11 rounded-full" />
+          </div>
+        )}
       </div>
     </div>
   );

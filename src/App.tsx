@@ -52,6 +52,7 @@ export function App() {
   const [selectedCard, setSelectedCard] = useState<BusinessCardData | null>(null);
   const [qrModalCard, setQrModalCard] = useState<BusinessCardData | null>(null);
   const [isFormModalOpen, setIsFormModalOpen] = useState(false);
+  const [openLiveCameraOnForm, setOpenLiveCameraOnForm] = useState(false);
   const [editingCard, setEditingCard] = useState<BusinessCardData | null>(null);
   const [isMyCardModalOpen, setIsMyCardModalOpen] = useState(false);
   const [isEditingMyCard, setIsEditingMyCard] = useState(false);
@@ -344,6 +345,7 @@ export function App() {
               onClick={() => {
                 setEditingCard(null);
                 setIsEditingMyCard(false);
+                setOpenLiveCameraOnForm(true);
                 setIsFormModalOpen(true);
               }}
               className="flex-1 sm:flex-initial px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition active:scale-95 shadow-md shadow-blue-600/25 flex items-center justify-center gap-1.5"
@@ -634,10 +636,12 @@ export function App() {
       <CardFormModal
         isOpen={isFormModalOpen}
         initialData={isEditingMyCard ? myCard : editingCard}
+        initialOpenLiveCamera={openLiveCameraOnForm}
         onClose={() => {
           setIsFormModalOpen(false);
           setEditingCard(null);
           setIsEditingMyCard(false);
+          setOpenLiveCameraOnForm(false);
         }}
         onSave={handleSaveCard}
         onOpenApiKeyModal={() => setIsApiKeyModalOpen(true)}

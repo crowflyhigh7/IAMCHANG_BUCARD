@@ -34,6 +34,7 @@ import { CropRect, detectCardBounds, cropImageByRect } from '../utils/imageCrop'
 interface CardFormModalProps {
   initialData?: BusinessCardData | null;
   isOpen: boolean;
+  initialOpenLiveCamera?: boolean;
   onClose: () => void;
   onSave: (card: Omit<BusinessCardData, 'id' | 'createdAt' | 'updatedAt'>, id?: string) => void;
   onOpenApiKeyModal: () => void;
@@ -51,6 +52,7 @@ const THEME_OPTIONS: CardTheme[] = [
 export const CardFormModal: React.FC<CardFormModalProps> = ({
   initialData,
   isOpen,
+  initialOpenLiveCamera = false,
   onClose,
   onSave,
   onOpenApiKeyModal,
@@ -116,8 +118,11 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       setTheme('modern-blue');
       setIsFavorite(false);
       setScannedImagePreview(null);
+      if (initialOpenLiveCamera) {
+        setIsLiveCameraOpen(true);
+      }
     }
-  }, [initialData, isOpen]);
+  }, [initialData, isOpen, initialOpenLiveCamera]);
 
   if (!isOpen) return null;
 
@@ -687,6 +692,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
         onClose={() => setIsLiveCameraOpen(false)}
         onCapture={handleLiveCameraCapture}
         onFallbackToFile={() => fileInputRef.current?.click()}
+        onFallbackToNativeCamera={() => cameraInputRef.current?.click()}
       />
     </>
   );
