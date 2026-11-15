@@ -16,14 +16,16 @@ import {
   Sparkles,
   Loader2,
   Image as ImageIcon,
-  Key
+  Key,
+  Crop
 } from 'lucide-react';
 import { BusinessCardData, CardTheme } from '../types/card';
 import { THEME_CONFIGS } from '../utils/theme';
 import { 
   getGeminiApiKey, 
   resizeImageToDataUrl, 
-  extractCardInfoWithGemini 
+  extractCardInfoWithGemini,
+  cropImageToBoundingBox
 } from '../utils/geminiOcr';
 import { uploadCardImage } from '../utils/api';
 
@@ -109,7 +111,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
   if (!isOpen) return null;
 
-  // AI Camera / Image recognition & Cloud upload handler
+  // AI Camera / Image recognition, auto-crop & Cloud upload handler
   const handleImageCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -124,20 +126,28 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
     try {
       setIsScanning(true);
-      setScanStatusMessage('사진 최적화 및 압축 중...');
+      setScanStatusMessage('사진 최적화 중...');
 
-      // 1. Resize & compress image
+      // 1. Resize & compress initial image
       const { dataUrl, base64Data, mimeType } = await resizeImageToDataUrl(file);
       setScannedImagePreview(dataUrl);
 
-      // 2. AI 판독 실행 (상태 콜백 포함)
-      setScanStatusMessage('AI 모델에 연결 중...');
+      // 2. AI 판독 및 명함 테두리(box_2d) 감지
+      setScanStatusMessage('명함 본체 자동 감지 및 텍스트 판독 중...');
       const extracted = await extractCardInfoWithGemini(
         base64Data,
         mimeType,
         apiKey,
         (msg) => setScanStatusMessage(msg)
       );
+
+      // 3. 배경 제거 및 명함 본체만 오려내기 (Auto Crop)
+      setScanStatusMessage('명함 영역만 깔끔하게 오려내는 중...');
+      const { croppedDataUrl, croppedBase64 } = await cropImageToBoundingBox(
+        dataUrl,
+        extracted.box_2d
+      );
+      setScannedImagePreview(croppedDataUrl);
 
       // Auto-fill form fields
       if (extracted.name) setName(extracted.name);
@@ -154,15 +164,15 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
         setTagInput(extracted.tags.join(', '));
       }
 
-      // 3. Cloudflare R2에 사진 백그라운드 업로드
-      setScanStatusMessage('클라우드에 명함 사진 보관 중...');
-      uploadCardImage(base64Data, mimeType)
+      // 4. 오려낸 깨끗한 명함 사진을 Cloudflare R2에 업로드
+      setScanStatusMessage('오려낸 명함을 클라우드에 저장하는 중...');
+      uploadCardImage(croppedBase64, 'image/jpeg')
         .then((r2Url) => {
           if (r2Url) setScannedImagePreview(r2Url);
         })
         .catch((err) => console.warn('R2 upload failed, keeping base64:', err));
 
-      setScanStatusMessage('판독 완료! 정보를 확인해주세요.');
+      setScanStatusMessage('명함 오려내기 및 판독 완료!');
       setTimeout(() => {
         setIsScanning(false);
         setScanStatusMessage('');
@@ -226,7 +236,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
               {initialData ? '명함 정보 수정' : '새 명함 등록'}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              카메라로 찍거나 직접 입력하여 클라우드에 영구 보관하세요.
+              카메라로 찍으면 명함만 쏙 오려내어 클라우드에 자동 저장됩니다.
             </p>
           </div>
           <button
@@ -242,15 +252,15 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-md shadow-blue-500/25 shrink-0">
-                <Sparkles className="w-5 h-5" />
+                <Crop className="w-5 h-5" />
               </div>
               <div>
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
-                  <span>AI 스마트 명함 스캐너</span>
-                  <span className="text-[10px] bg-blue-600 text-white font-bold px-1.5 py-0.2 rounded-md">Gemini</span>
+                  <span>AI 명함 자동 오려내기 & 스캔</span>
+                  <span className="text-[10px] bg-blue-600 text-white font-bold px-1.5 py-0.2 rounded-md">Auto-Crop</span>
                 </h3>
                 <p className="text-xs text-slate-600 mt-0.5">
-                  명함을 촬영하면 사진은 Cloudflare R2에 저장되고, 정보는 자동 완성됩니다.
+                  배경(책상 등)은 자동으로 잘라내고 명함 본체만 깨끗하게 저장합니다.
                 </p>
               </div>
             </div>
@@ -313,29 +323,34 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
               <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold text-blue-900">{scanStatusMessage}</p>
-                <p className="text-[11px] text-slate-500">진행 중입니다 (약 1~3초 소요)...</p>
+                <p className="text-[11px] text-slate-500">배경을 감지하여 명함을 깔끔하게 추출 중입니다...</p>
               </div>
             </div>
           )}
 
-          {/* Scanned Card Preview Thumbnail */}
+          {/* Scanned & Cropped Card Preview Thumbnail */}
           {scannedImagePreview && !isScanning && (
             <div className="mt-3.5 pt-3 border-t border-blue-200/60 flex items-center justify-between text-xs">
               <div className="flex items-center gap-3">
-                <img
-                  src={scannedImagePreview}
-                  alt="명함 미리보기"
-                  className="w-16 h-10 object-cover rounded-lg border border-slate-300 shadow-xs"
-                />
-                <span className="text-slate-700 font-semibold flex items-center gap-1">
-                  <Check className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>실물 명함 사진이 첨부되었습니다</span>
-                </span>
+                <div className="p-0.5 bg-white border border-slate-300 rounded-lg shadow-xs">
+                  <img
+                    src={scannedImagePreview}
+                    alt="오려낸 명함 미리보기"
+                    className="w-18 h-11 object-contain rounded-md"
+                  />
+                </div>
+                <div>
+                  <span className="text-slate-800 font-bold flex items-center gap-1">
+                    <Check className="w-3.5 h-3.5 text-emerald-600 stroke-[3]" />
+                    <span>명함 부분만 깔끔하게 오려냄 완료!</span>
+                  </span>
+                  <p className="text-[11px] text-slate-500">배경이 깨끗하게 제거되었습니다.</p>
+                </div>
               </div>
               <button
                 type="button"
                 onClick={() => setScannedImagePreview(null)}
-                className="text-slate-400 hover:text-rose-500 text-[11px]"
+                className="text-slate-400 hover:text-rose-500 text-[11px] px-2 py-1 rounded-md hover:bg-white"
               >
                 사진 삭제
               </button>
@@ -349,7 +364,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
           <div>
             <label className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
               <Palette className="w-3.5 h-3.5 text-blue-600" />
-              <span>명함 디자인 테마 (사진이 없을 때 표시)</span>
+              <span>명함 디자인 테마 (실물 사진이 없을 때 표시)</span>
             </label>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
               {THEME_OPTIONS.map((thKey) => {

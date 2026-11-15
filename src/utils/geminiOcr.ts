@@ -1,5 +1,5 @@
 /**
- * Gemini AI Vision API를 이용한 명함 자동 인식 및 정보 추출 유틸리티
+ * Gemini AI Vision API를 이용한 명함 자동 인식 및 테두리 자동 크롭 유틸리티
  */
 
 const STORAGE_KEY_GEMINI_API_KEY = 'bucard_gemini_api_key';
@@ -26,12 +26,14 @@ export interface ExtractedCardInfo {
   address?: string;
   memo?: string;
   tags?: string[];
+  // 명함 본체의 0~1000 정규화 좌표 [ymin, xmin, ymax, xmax]
+  box_2d?: [number, number, number, number];
 }
 
 /**
- * 모바일 고해상도 사진을 브라우저 캔버스를 통해 1000px 이내로 리사이징 및 압축합니다.
+ * 모바일 원본 사진을 1200px 수준으로 1차 리사이징/압축
  */
-export async function resizeImageToDataUrl(file: File, maxDimension = 1000): Promise<{ dataUrl: string; base64Data: string; mimeType: string }> {
+export async function resizeImageToDataUrl(file: File, maxDimension = 1400): Promise<{ dataUrl: string; base64Data: string; mimeType: string; originalWidth: number; originalHeight: number }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('파일 읽기에 실패했습니다.'));
@@ -63,13 +65,85 @@ export async function resizeImageToDataUrl(file: File, maxDimension = 1000): Pro
 
         ctx.drawImage(img, 0, 0, width, height);
         const mimeType = 'image/jpeg';
-        const dataUrl = canvas.toDataURL(mimeType, 0.8);
+        const dataUrl = canvas.toDataURL(mimeType, 0.85);
         const base64Data = dataUrl.split(',')[1];
-        resolve({ dataUrl, base64Data, mimeType });
+        resolve({ dataUrl, base64Data, mimeType, originalWidth: width, originalHeight: height });
       };
       img.src = reader.result as string;
     };
     reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * AI가 감지한 [ymin, xmin, ymax, xmax] (0~1000 정규화 좌표)를 기준으로
+ * 책상 배경이나 여백을 잘라내고 명함 본체만 깔끔하게 오려냅니다.
+ */
+export async function cropImageToBoundingBox(
+  sourceDataUrl: string,
+  box?: [number, number, number, number]
+): Promise<{ croppedDataUrl: string; croppedBase64: string }> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      // 유효한 바운딩 박스가 없으면 원본 그대로 반환
+      if (!box || !Array.isArray(box) || box.length !== 4) {
+        const base64 = sourceDataUrl.split(',')[1] || '';
+        resolve({ croppedDataUrl: sourceDataUrl, croppedBase64: base64 });
+        return;
+      }
+
+      let [ymin, xmin, ymax, xmax] = box;
+
+      // 0~1000 정규화 좌표를 0~1 범위로 보정
+      if (ymax <= 1 && xmax <= 1) {
+        ymin = ymin * 1000;
+        xmin = xmin * 1000;
+        ymax = ymax * 1000;
+        xmax = xmax * 1000;
+      }
+
+      // 살짝의 여백(패딩 1%)을 주어 명함 테두리가 잘리지 않도록 안전 처리
+      const padY = Math.round((ymax - ymin) * 0.01);
+      const padX = Math.round((xmax - xmin) * 0.01);
+
+      const clampedYmin = Math.max(0, ymin - padY);
+      const clampedXmin = Math.max(0, xmin - padX);
+      const clampedYmax = Math.min(1000, ymax + padY);
+      const clampedXmax = Math.min(1000, xmax + padX);
+
+      const cropX = Math.round((clampedXmin / 1000) * img.width);
+      const cropY = Math.round((clampedYmin / 1000) * img.height);
+      const cropW = Math.round(((clampedXmax - clampedXmin) / 1000) * img.width);
+      const cropH = Math.round(((clampedYmax - clampedYmin) / 1000) * img.height);
+
+      if (cropW < 50 || cropH < 50) {
+        // 크롭 영역이 너무 작거나 비정상이면 원본 유지
+        const base64 = sourceDataUrl.split(',')[1] || '';
+        resolve({ croppedDataUrl: sourceDataUrl, croppedBase64: base64 });
+        return;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = cropW;
+      canvas.height = cropH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        const base64 = sourceDataUrl.split(',')[1] || '';
+        resolve({ croppedDataUrl: sourceDataUrl, croppedBase64: base64 });
+        return;
+      }
+
+      ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+      const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      const croppedBase64 = croppedDataUrl.split(',')[1];
+      resolve({ croppedDataUrl, croppedBase64 });
+    };
+    img.onerror = () => {
+      const base64 = sourceDataUrl.split(',')[1] || '';
+      resolve({ croppedDataUrl: sourceDataUrl, croppedBase64: base64 });
+    };
+    img.src = sourceDataUrl;
   });
 }
 
@@ -136,12 +210,11 @@ async function findAvailableModel(apiKey: string): Promise<string> {
     console.warn('ListModels failed, using fallback list:', e);
   }
 
-  // fallback 기본값
   return 'gemini-1.5-flash-latest';
 }
 
 /**
- * Gemini 비전 모델을 호출하여 명함 사진에서 연락처 정보를 JSON으로 추출합니다.
+ * Gemini 비전 모델을 호출하여 명함 사진에서 연락처 정보와 명함의 바운딩 박스(box_2d)를 함께 추출합니다.
  */
 export async function extractCardInfoWithGemini(
   base64Image: string,
@@ -155,27 +228,30 @@ export async function extractCardInfoWithGemini(
 
   onStatusUpdate?.('사용 가능한 AI 모델 확인 중...');
   const targetModel = await findAvailableModel(apiKey);
-  console.log('Selected Gemini Model:', targetModel);
 
-  onStatusUpdate?.(`AI가 명함 정보를 정밀 판독하는 중 (${targetModel})...`);
+  onStatusUpdate?.(`명함 본체 자동 감지 및 텍스트 판독 중 (${targetModel})...`);
 
   const prompt = `
-당신은 명함 판독 최고 전문가입니다.
-제공된 명함 사진에서 글자를 정확하게 인식(OCR)하고 문맥을 파악하여 다음 JSON 스키마에 맞춰 정보를 추출하세요.
+당신은 대한민국 및 글로벌 비즈니스 명함 판독 최고 전문가입니다.
+제공된 사진에서 다음 두 가지 작업을 정확하게 수행하세요:
 
-반드시 마크다운이나 기타 텍스트 없이 오직 유효한 순수 JSON만 반환하세요:
+1. [가장 중요] 사진 속에 놓인 '실제 종이 명함 본체'의 사각 테두리 경계 영역(Bounding Box)을 0~1000 범위의 정규화 정수 좌표 [ymin, xmin, ymax, xmax]로 정확히 감지하세요. (책상, 손가락, 주변 배경은 제외하고 오직 명함 종이 영역만 지정)
+2. 명함 내의 글자를 정확히 읽어 인적 사항 및 연락처 정보를 추출하세요.
+
+반드시 마크다운이나 기타 설명 없이 오직 유효한 순수 JSON만 반환하세요:
 {
+  "box_2d": [ymin, xmin, ymax, xmax],
   "name": "성명 (반드시 성과 이름 포함)",
-  "position": "직책 및 직급 (예: 대표이사, 팀장, 수석연구원, CEO 등. 없으면 빈 문자열)",
-  "company": "회사명/상호명 (예: (주)알파소프트 등)",
+  "position": "직책 및 직급 (예: 대표이사, 실장, 팀장, 수석연구원 등. 없으면 빈 문자열)",
+  "company": "회사명/상호명 (예: (주)카스갤러리 등)",
   "department": "부서명 (없으면 빈 문자열)",
   "phone": "휴대전화번호 (010-XXXX-XXXX 형식, 없으면 빈 문자열)",
   "tel": "대표/사무실 유선전화번호 (없으면 빈 문자열)",
   "email": "이메일 주소 (없으면 빈 문자열)",
   "website": "웹사이트 주소 (없으면 빈 문자열)",
-  "address": "회사/사업장 주소 (없으면 빈 문자열)",
-  "memo": "명함에 적힌 주요 슬로건 또는 업무 요약 (없으면 빈 문자열)",
-  "tags": ["업종이나 직무 관련 추천 키워드 1~3개"]
+  "address": "사업장 또는 회사 주소 (없으면 빈 문자열)",
+  "memo": "명함에 기재된 슬로건, 주요 취급 품목 등 부가 요약 (없으면 빈 문자열)",
+  "tags": ["업종이나 직무와 관련된 추천 키워드 1~3개"]
 }
 `;
 
@@ -208,7 +284,7 @@ export async function extractCardInfoWithGemini(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestBody),
     },
-    20000 // 20초 타임아웃
+    20000
   );
 
   if (!response.ok) {
