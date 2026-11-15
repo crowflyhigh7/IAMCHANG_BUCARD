@@ -61,19 +61,19 @@ export const CardModal: React.FC<CardModalProps> = ({
           {hasPhoto ? (
             <div className="relative bg-slate-950 group">
               <div 
-                className="w-full h-56 sm:h-64 cursor-zoom-in overflow-hidden flex items-center justify-center relative"
+                className="w-full h-56 sm:h-64 cursor-zoom-in overflow-hidden flex items-center justify-center relative select-none"
                 onClick={() => setIsPhotoZoomed(true)}
               >
                 <img
                   src={card.avatarUrl}
                   alt={`${card.name} 명함 실물`}
-                  className="w-full h-full object-contain bg-slate-900"
+                  className="w-full h-full object-contain bg-slate-900 transition-transform duration-300 group-hover:scale-[1.02]"
                 />
-                <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-                  <span className="px-3 py-1.5 rounded-xl bg-black/70 text-white text-xs font-semibold flex items-center gap-1.5 backdrop-blur-md">
-                    <Maximize2 className="w-3.5 h-3.5" />
-                    <span>사진 크게 보기</span>
-                  </span>
+                
+                {/* Visual hint on photo */}
+                <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-black/70 backdrop-blur-md text-white text-xs font-medium flex items-center gap-1.5 shadow-md">
+                  <Maximize2 className="w-3.5 h-3.5 text-blue-300" />
+                  <span>터치하여 크게보기</span>
                 </div>
               </div>
 
@@ -101,18 +101,26 @@ export const CardModal: React.FC<CardModalProps> = ({
 
               {/* Bottom banner info overlay */}
               <div className="p-4 bg-slate-900 text-white flex items-center justify-between border-t border-slate-800">
-                <div>
-                  <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight">
+                <div className="min-w-0 mr-2">
+                  <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight truncate">
                     {card.name}
                   </h2>
-                  <p className="text-xs text-blue-300 font-medium">
+                  <p className="text-xs text-blue-300 font-medium truncate">
                     {card.position || '직책'} · {card.company || '소속 미지정'}
                   </p>
                 </div>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/80 border border-white/15 flex items-center gap-1">
-                  <ImageIcon className="w-3 h-3 text-emerald-400" />
-                  <span>실물 명함</span>
-                </span>
+                
+                {/* 실물 명함 클릭 시 원본 크게보기 팝업 열기 */}
+                <button
+                  type="button"
+                  onClick={() => setIsPhotoZoomed(true)}
+                  className="text-xs px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5 transition active:scale-95 shrink-0 shadow-sm"
+                  title="실물 명함 원본 크게 보기"
+                >
+                  <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="font-bold">실물 명함</span>
+                  <Maximize2 className="w-3 h-3 text-emerald-400 opacity-70" />
+                </button>
               </div>
             </div>
           ) : (
@@ -346,23 +354,56 @@ export const CardModal: React.FC<CardModalProps> = ({
         </div>
       </div>
 
-      {/* Fullscreen Photo Lightbox Modal */}
+      {/* Fullscreen Photo Lightbox Modal (z-[110]으로 모달 최상단에 완전 표시) */}
       {isPhotoZoomed && hasPhoto && (
         <div 
-          className="fixed inset-0 z-60 bg-black/95 flex items-center justify-center p-4 cursor-zoom-out animate-fade-in"
+          className="fixed inset-0 z-[110] bg-black/95 flex flex-col justify-between p-4 sm:p-6 animate-fade-in touch-none select-none cursor-zoom-out"
           onClick={() => setIsPhotoZoomed(false)}
         >
-          <button
-            onClick={() => setIsPhotoZoomed(false)}
-            className="absolute top-4 right-4 p-2.5 rounded-full bg-white/20 text-white hover:bg-white/30 transition"
-          >
-            <X className="w-6 h-6" />
-          </button>
-          <img
-            src={card.avatarUrl}
-            alt={`${card.name} 명함 원본`}
-            className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
-          />
+          {/* Top Bar */}
+          <div className="w-full flex items-center justify-between text-white z-10 pt-safe">
+            <div className="flex items-center gap-2">
+              <span className="text-base font-bold">{card.name}</span>
+              <span className="text-xs text-slate-400">· 실물 명함 원본</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                href={card.avatarUrl}
+                download={`${card.name}_명함.jpg`}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="p-2.5 rounded-full bg-white/15 hover:bg-white/25 text-white transition active:scale-95"
+                title="사진 다운로드"
+              >
+                <Download className="w-5 h-5" />
+              </a>
+              <button
+                onClick={() => setIsPhotoZoomed(false)}
+                className="p-2.5 rounded-full bg-white/20 text-white hover:bg-white/30 transition active:scale-95"
+                title="닫기"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Centered Image Viewport */}
+          <div className="flex-1 w-full flex items-center justify-center p-2 min-h-0">
+            <img
+              src={card.avatarUrl}
+              alt={`${card.name} 명함 원본`}
+              className="max-w-full max-h-full object-contain rounded-2xl shadow-2xl transition-transform"
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
+
+          {/* Bottom Hint */}
+          <div className="pb-safe text-center py-2">
+            <span className="text-xs text-slate-400 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-md">
+              화면의 빈 공간을 터치하면 닫힙니다
+            </span>
+          </div>
         </div>
       )}
     </>
