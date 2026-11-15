@@ -27,10 +27,10 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   onFallbackToNativeCamera,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const guideBoxRef = useRef<HTMLDivElement>(null);
 
-  const [stream, setStream] = useState<MediaStream | null>(null);
   const [isLoadingCamera, setIsLoadingCamera] = useState(true);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -43,16 +43,26 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   const [hasTorch, setHasTorch] = useState(false);
   const [isTorchOn, setIsTorchOn] = useState(false);
 
+  // Debug metric display for instant troubleshooting
+  const [debugMetric, setDebugMetric] = useState<string>('');
+
   // Animation frame ref & Hysteresis stability tracker
   const animFrameId = useRef<number | null>(null);
   const lastCheckTime = useRef<number>(0);
   const stabilityRef = useRef<number>(0); // 0.0 to 1.0 (smooth accumulator)
 
-  // 1. 카메라 시작 (다단계 제약조건 폴백으로 100% 연결 보장)
+  // 1. 카메라 시작 (streamRef 보관 및 단 1회 실행 보장)
   const startCamera = useCallback(async () => {
     try {
       setIsLoadingCamera(true);
       setPermissionError(null);
+
+      // 이미 스트림이 열려 있다면 재사용
+      if (streamRef.current && streamRef.current.active) {
+        setIsLoadingCamera(false);
+        setHasPermission(true);
+        return;
+      }
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('이 브라우저는 웹 실시간 카메라 스트리밍을 지원하지 않습니다.');
@@ -60,7 +70,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
 
       let mediaStream: MediaStream | null = null;
 
-      // 1차 시도: 후면 카메라 + 고화질 ideal (min 제약조건 제거)
+      // 1차: 후면 카메라 + 고화질 ideal
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
           video: {
@@ -73,14 +83,14 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       } catch (e1) {
         console.warn('Primary camera constraints failed, trying fallback 1:', e1);
         try {
-          // 2차 시도: 기본 후면 카메라
+          // 2차: 단순 후면 카메라
           mediaStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: 'environment' },
             audio: false,
           });
         } catch (e2) {
           console.warn('Fallback 1 failed, trying fallback 2 (any video):', e2);
-          // 3차 시도: 기본 시스템 카메라
+          // 3차: 기본 비디오
           mediaStream = await navigator.mediaDevices.getUserMedia({
             video: true,
             audio: false,
@@ -92,8 +102,25 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
         throw new Error('카메라 스트림을 획득할 수 없습니다.');
       }
 
-      setStream(mediaStream);
+      streamRef.current = mediaStream;
       setHasPermission(true);
+
+      const video = videoRef.current;
+      if (video) {
+        video.srcObject = mediaStream;
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('webkit-playsinline', 'true');
+        video.muted = true;
+        try {
+          await video.play();
+          setIsLoadingCamera(false);
+        } catch (playErr) {
+          console.warn('Direct video.play failed, waiting for metadata:', playErr);
+          video.onloadedmetadata = () => {
+            video.play().then(() => setIsLoadingCamera(false)).catch(console.warn);
+          };
+        }
+      }
 
       // Torch (플래시) 지원 확인
       const videoTrack = mediaStream.getVideoTracks()[0];
@@ -115,45 +142,32 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     }
   }, []);
 
-  // stream 변경 시 비디오 엘리먼트에 즉시 바인딩 및 재생
-  useEffect(() => {
-    if (stream && videoRef.current) {
-      const video = videoRef.current;
-      video.srcObject = stream;
-      video.setAttribute('playsinline', 'true');
-      video.setAttribute('webkit-playsinline', 'true');
-      video.muted = true;
-      video.play()
-        .then(() => setIsLoadingCamera(false))
-        .catch((err) => {
-          console.warn('Direct video.play failed, waiting for metadata:', err);
-          video.onloadedmetadata = () => {
-            video.play().then(() => setIsLoadingCamera(false)).catch(console.warn);
-          };
-        });
-    }
-  }, [stream]);
-
-  // 2. 카메라 정리
+  // 2. 카메라 정리 (빈 의존성 배열로 리렌더링 시 함수 재정의 절대 방지)
   const stopCamera = useCallback(() => {
     if (animFrameId.current) {
       cancelAnimationFrame(animFrameId.current);
       animFrameId.current = null;
     }
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
-      setStream(null);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        try { track.stop(); } catch (_) {}
+      });
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
     stabilityRef.current = 0;
     setIsCardAligned(false);
     setAlignProgress(0);
     setIsLoadingCamera(false);
-  }, [stream]);
+    setIsTorchOn(false);
+  }, []);
 
   // 플래시 토글
   const toggleTorch = async () => {
-    if (!stream) return;
-    const track = stream.getVideoTracks()[0];
+    if (!streamRef.current) return;
+    const track = streamRef.current.getVideoTracks()[0];
     if (track) {
       try {
         const nextState = !isTorchOn;
@@ -202,9 +216,21 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     setIsCapturing(false);
   }, [isCapturing, onCapture, stopCamera]);
 
-  // 4. 실시간 가이드라인 정렬 및 손떨림 감지 루프 (안정화 필터 적용으로 깜빡임 원천 차단)
+  // 4. 모달 열림/닫힘 생명주기 (오직 isOpen에만 의존하여 무한 재시작 루프 100% 방지)
   useEffect(() => {
-    if (!isOpen || !hasPermission || !videoRef.current) return;
+    if (isOpen) {
+      startCamera();
+    } else {
+      stopCamera();
+    }
+    return () => {
+      stopCamera();
+    };
+  }, [isOpen, startCamera, stopCamera]);
+
+  // 5. 실시간 가이드라인 정렬 및 손떨림 감지 루프
+  useEffect(() => {
+    if (!isOpen || !hasPermission) return;
 
     let isRunning = true;
 
@@ -212,7 +238,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       if (!isRunning) return;
 
       const now = performance.now();
-      // 약 100ms마다 한 번씩 분석 (초당 10회 검사)
+      // 약 100ms마다 한 번씩 검사 (초당 10회)
       if (now - lastCheckTime.current >= 100) {
         lastCheckTime.current = now;
 
@@ -244,9 +270,9 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           const srcW = Math.min(W_vid - srcX, Math.round(guideRect.width / scale));
           const srcH = Math.min(H_vid - srcY, Math.round(guideRect.height / scale));
 
-          // 100x60 크기로 다운샘플링하여 안정성 분석
-          const sampleW = 100;
-          const sampleH = 60;
+          // 80x48 크기로 다운샘플링하여 빠른 안정성 분석
+          const sampleW = 80;
+          const sampleH = 48;
           const canvas = canvasRef.current || document.createElement('canvas');
           canvas.width = sampleW;
           canvas.height = sampleH;
@@ -267,8 +293,8 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
             let count = 0;
             const values: number[] = [];
 
-            for (let y = 10; y < sampleH - 10; y += 4) {
-              for (let x = 10; x < sampleW - 10; x += 5) {
+            for (let y = 6; y < sampleH - 6; y += 4) {
+              for (let x = 6; x < sampleW - 6; x += 4) {
                 const b = getB(x, y);
                 sum += b;
                 values.push(b);
@@ -276,40 +302,37 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
               }
             }
 
-            const avgBrightness = sum / Math.max(1, count);
+            const avgBrightness = Math.round(sum / Math.max(1, count));
             let variance = 0;
             for (const val of values) {
               variance += Math.pow(val - avgBrightness, 2);
             }
-            const stdDev = Math.sqrt(variance / Math.max(1, count));
+            const stdDev = Math.round(Math.sqrt(variance / Math.max(1, count)));
 
-            // 가이드라인 내에 명함이 안정적으로 들어와 있는지 판정:
-            // 1. 평균 밝기가 명함 종이 수준 (> 90)
-            // 2. 내부 텍스트나 인쇄물로 인한 적정 대비가 존재함 (stdDev > 5, 빈 단색 벽 제외)
-            const isCardPresent = avgBrightness > 90 && stdDev > 5;
+            // 명함 존재 판정: 밝기 > 80 (일반 실내 조명), 표준편차 > 4 (글자/대비 존재)
+            const isCardPresent = avgBrightness > 80 && stdDev > 4;
 
-            // Hysteresis 히스테리시스 필터링 (깜빡임 원천 방지)
+            // Hysteresis 필터링 (부드러운 누적 및 감쇠)
             if (isCardPresent) {
-              // 감지 시 부드럽게 누적 (+0.25) -> 약 0.5초(4~5프레임) 유지 시 1.0 도달
               stabilityRef.current = Math.min(1.0, stabilityRef.current + 0.25);
             } else {
-              // 미감지 시 천천히 감소 (-0.08) -> 일시적 흔들림이나 프레임 드랍에도 깜빡이지 않음
-              stabilityRef.current = Math.max(0.0, stabilityRef.current - 0.08);
+              stabilityRef.current = Math.max(0.0, stabilityRef.current - 0.1);
             }
 
             const currentScore = stabilityRef.current;
             const progress = Math.round(currentScore * 100);
             setAlignProgress(progress);
+            setDebugMetric(`밝기:${avgBrightness} | 대비:${stdDev} | 안정:${progress}%`);
 
-            // 상태 전환 히스테리시스: 30% 이상일 때 켜지고, 10% 이하로 떨어져야 꺼짐
-            if (currentScore >= 0.3) {
+            // 상태 전환 히스테리시스 (깜빡임 차단)
+            if (currentScore >= 0.25) {
               setIsCardAligned(true);
-            } else if (currentScore <= 0.1) {
+            } else if (currentScore <= 0.05) {
               setIsCardAligned(false);
             }
 
-            // 95% 이상 안정화 시 자동 셔터 발동!
-            if (currentScore >= 0.95) {
+            // 90% 이상 도달 시 찰칵 자동 촬영 발동!
+            if (currentScore >= 0.9) {
               triggerCapture();
               return;
             }
@@ -327,18 +350,6 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       if (animFrameId.current) cancelAnimationFrame(animFrameId.current);
     };
   }, [isOpen, hasPermission, triggerCapture]);
-
-  // 모달 열림/닫힘 생명주기
-  useEffect(() => {
-    if (isOpen) {
-      startCamera();
-    } else {
-      stopCamera();
-    }
-    return () => {
-      stopCamera();
-    };
-  }, [isOpen, startCamera, stopCamera]);
 
   if (!isOpen) return null;
 
@@ -400,16 +411,12 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           </div>
         )}
 
-        {/* Live Camera Video (확실한 전체 화면 커버) */}
+        {/* Live Camera Video (전체 화면 커버) */}
         <video
           ref={videoRef}
           playsInline
           muted
           autoPlay
-          onLoadedMetadata={() => {
-            videoRef.current?.play().then(() => setIsLoadingCamera(false)).catch(console.warn);
-          }}
-          onPlaying={() => setIsLoadingCamera(false)}
           className="absolute inset-0 w-full h-full object-cover z-0"
         />
 
@@ -454,7 +461,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
         {/* Dark Vignette Mask Outside Guideline Box */}
         {!permissionError && (
           <div className="absolute inset-0 pointer-events-none z-10">
-            {/* Guide Box (외곽 치수는 불변으로 고정하여 흔들림/깜빡임 루프 제거) */}
+            {/* Guide Box (외곽 치수는 불변으로 고정) */}
             <div className="absolute inset-0 flex items-center justify-center p-4">
               <div
                 ref={guideBoxRef}
@@ -514,6 +521,15 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
                     )}
                   </div>
                 </div>
+
+                {/* Live Real-time Debug Metric Pill */}
+                {debugMetric && (
+                  <div className="absolute -bottom-8 left-0 right-0 flex justify-center">
+                    <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-black/60 text-emerald-300 backdrop-blur-xs">
+                      {debugMetric}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
