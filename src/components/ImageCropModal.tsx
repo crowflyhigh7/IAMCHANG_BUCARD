@@ -129,7 +129,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 z-60 flex flex-col bg-slate-950/92 backdrop-blur-md animate-fade-in touch-none select-none"
+      className="fixed inset-0 z-[90] flex flex-col bg-slate-950/92 backdrop-blur-md animate-fade-in touch-none select-none"
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
     >

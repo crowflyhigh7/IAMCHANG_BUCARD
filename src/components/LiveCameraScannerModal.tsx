@@ -60,7 +60,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
 
       let mediaStream: MediaStream | null = null;
 
-      // 1차 시도: 후면 카메라 + 고화질 ideal (min 제약조건을 제거하여 portrait 회전 에러 방지)
+      // 1차 시도: 후면 카메라 + 고화질 ideal (min 제약조건 제거)
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
           video: {
@@ -80,7 +80,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           });
         } catch (e2) {
           console.warn('Fallback 1 failed, trying fallback 2 (any video):', e2);
-          // 3차 시도: 기본 시스템 카메라 (데스크톱 웹캠 등)
+          // 3차 시도: 기본 시스템 카메라
           mediaStream = await navigator.mediaDevices.getUserMedia({
             video: true,
             audio: false,
@@ -94,23 +94,6 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
 
       setStream(mediaStream);
       setHasPermission(true);
-      setIsLoadingCamera(false);
-
-      const video = videoRef.current;
-      if (video) {
-        video.srcObject = mediaStream;
-        video.setAttribute('playsinline', 'true');
-        video.setAttribute('webkit-playsinline', 'true');
-        video.muted = true;
-        try {
-          await video.play();
-        } catch (playErr) {
-          console.warn('Video play error, retrying on loadedmetadata:', playErr);
-          video.onloadedmetadata = () => {
-            video.play().catch(console.warn);
-          };
-        }
-      }
 
       // Torch (플래시) 지원 확인
       const videoTrack = mediaStream.getVideoTracks()[0];
@@ -131,6 +114,25 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       }
     }
   }, []);
+
+  // stream 변경 시 비디오 엘리먼트에 즉시 바인딩 및 재생
+  useEffect(() => {
+    if (stream && videoRef.current) {
+      const video = videoRef.current;
+      video.srcObject = stream;
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('webkit-playsinline', 'true');
+      video.muted = true;
+      video.play()
+        .then(() => setIsLoadingCamera(false))
+        .catch((err) => {
+          console.warn('Direct video.play failed, waiting for metadata:', err);
+          video.onloadedmetadata = () => {
+            video.play().then(() => setIsLoadingCamera(false)).catch(console.warn);
+          };
+        });
+    }
+  }, [stream]);
 
   // 2. 카메라 정리
   const stopCamera = useCallback(() => {
@@ -332,13 +334,13 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-70 bg-black flex flex-col justify-between overflow-hidden select-none animate-fade-in touch-none">
+    <div className="fixed inset-0 z-[100] bg-black flex flex-col justify-between overflow-hidden select-none animate-fade-in touch-none">
       {/* Offscreen hidden canvas for CV frame analysis */}
       <canvas ref={canvasRef} className="hidden" />
 
       {/* White Flash Effect Overlay */}
       {isFlashActive && (
-        <div className="absolute inset-0 bg-white z-80 pointer-events-none animate-ping opacity-90" />
+        <div className="absolute inset-0 bg-white z-[120] pointer-events-none animate-ping opacity-90" />
       )}
 
       {/* Top Header Bar */}
@@ -380,22 +382,26 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       </div>
 
       {/* Center Camera Viewport */}
-      <div className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden">
+      <div className="relative flex-1 w-full min-h-0 flex items-center justify-center overflow-hidden">
         {/* Loading Spinner */}
         {isLoadingCamera && !permissionError && (
           <div className="absolute z-20 flex flex-col items-center gap-3 text-white">
             <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
-            <p className="text-xs font-semibold text-slate-200">카메라를 시작하는 중입니다...</p>
+            <p className="text-xs font-semibold text-slate-200">카메라 렌즈를 연결하는 중입니다...</p>
           </div>
         )}
 
-        {/* Live Camera Video */}
+        {/* Live Camera Video (확실한 전체 화면 커버) */}
         <video
           ref={videoRef}
           playsInline
           muted
           autoPlay
-          className="absolute inset-0 w-full h-full object-cover"
+          onLoadedMetadata={() => {
+            videoRef.current?.play().then(() => setIsLoadingCamera(false)).catch(console.warn);
+          }}
+          onPlaying={() => setIsLoadingCamera(false)}
+          className="absolute inset-0 w-full h-full object-cover z-0"
         />
 
         {/* Permission Error fallback banner */}

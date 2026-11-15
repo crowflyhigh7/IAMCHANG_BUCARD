@@ -298,7 +298,9 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto animate-fade-in">
+      <div className={`fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto animate-fade-in ${
+        isLiveCameraOpen ? 'opacity-0 pointer-events-none' : ''
+      }`}>
         <div 
           className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden my-6 border border-slate-100"
           onClick={(e) => e.stopPropagation()}
