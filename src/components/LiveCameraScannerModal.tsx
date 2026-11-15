@@ -39,6 +39,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
 
   // Auto-capture states
   const [focusState, setFocusState] = useState<'searching' | 'focusing' | 'locked'>('searching');
+  const [statusMessage, setStatusMessage] = useState<string>('');
   const [alignProgress, setAlignProgress] = useState(0); // 0 to 100%
   const [isCapturing, setIsCapturing] = useState(false);
   const [isFlashActive, setIsFlashActive] = useState(false);
@@ -56,6 +57,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   const lastCheckTime = useRef<number>(0);
   const stabilityRef = useRef<number>(0); // 0.0 to 1.0 (smooth accumulator)
   const prevFrameLumRef = useRef<Float32Array | null>(null);
+  const maxSharpnessRef = useRef<number>(0);
 
   // 1. 카메라 시작 (연속 자동 초점 focusMode: continuous 적용)
   const startCamera = useCallback(async () => {
@@ -174,8 +176,10 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       videoRef.current.srcObject = null;
     }
     stabilityRef.current = 0;
+    maxSharpnessRef.current = 0;
     prevFrameLumRef.current = null;
     setFocusState('searching');
+    setStatusMessage('');
     setAlignProgress(0);
     setIsLoadingCamera(false);
     setIsTorchOn(false);
@@ -300,7 +304,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     };
   }, [isOpen, startCamera, stopCamera]);
 
-  // 5. 실시간 초점(Sharpness) 및 손떨림 안정성 정밀 감지 루프
+  // 5. 라플라시안 분산(Variance of Laplacian) 기반 실시간 칼초점 감지 루프
   useEffect(() => {
     if (!isOpen || !hasPermission) return;
 
@@ -342,9 +346,9 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           const srcW = Math.min(W_vid - srcX, Math.round(guideRect.width / scale));
           const srcH = Math.min(H_vid - srcY, Math.round(guideRect.height / scale));
 
-          // 100x60 크기로 다운샘플링하여 초고속 분석 (비용 0.2ms 미만)
-          const sampleW = 100;
-          const sampleH = 60;
+          // 200x120 고정밀 해상도 다운샘플링 (글자 획의 2차 미분 검출에 최적화, 연산 비용 0.3ms 미만)
+          const sampleW = 200;
+          const sampleH = 120;
           const canvas = canvasRef.current || document.createElement('canvas');
           canvas.width = sampleW;
           canvas.height = sampleH;
@@ -360,46 +364,57 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
               return (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
             };
 
-            // A. 평균 밝기 측정 (명함 종이 유무)
+            // A. 평균 밝기 측정 (명함 종이 유무 확인)
             let sumB = 0;
             let countB = 0;
-            for (let y = 6; y < sampleH - 6; y += 3) {
-              for (let x = 6; x < sampleW - 6; x += 3) {
+            for (let y = 10; y < sampleH - 10; y += 4) {
+              for (let x = 10; x < sampleW - 10; x += 4) {
                 sumB += getB(x, y);
                 countB++;
               }
             }
             const avgBrightness = Math.round(sumB / Math.max(1, countB));
 
-            // B. 고주파 엣지 그래디언트(초점 선명도) 측정
-            // 외곽 테두리 제외한 내부 글자/로고 영역(15% ~ 85%)만 샘플링
+            // B. 라플라시안 2차 미분(Variance of Laplacian) 초정밀 칼초점 계산
+            // 인쇄 글자 및 로고가 위치하는 중심부(15% ~ 85%)만 집중 샘플링
             const minX = Math.round(sampleW * 0.15);
             const maxX = Math.round(sampleW * 0.85);
             const minY = Math.round(sampleH * 0.15);
             const maxY = Math.round(sampleH * 0.85);
 
-            let edgeSum = 0;
-            let edgeCount = 0;
-            let sharpEdgeCount = 0; // 글자 경계의 강한 엣지 픽셀 수
+            let sumL = 0;
+            let sumL2 = 0;
+            let sampleCount = 0;
+            let sharpEdgeCount = 0; // 글자 경계의 강한 2차 미분 엣지 픽셀 수 (|L| >= 30)
 
             for (let y = minY; y <= maxY; y += 2) {
               for (let x = minX; x <= maxX; x += 2) {
-                const gx = Math.abs(getB(x + 1, y) - getB(x - 1, y));
-                const gy = Math.abs(getB(x, y + 1) - getB(x, y - 1));
-                const grad = gx + gy;
-                edgeSum += grad;
-                if (grad >= 22) {
+                const c = getB(x, y);
+                const left = getB(x - 1, y);
+                const right = getB(x + 1, y);
+                const up = getB(x, y - 1);
+                const down = getB(x, y + 1);
+
+                // 이산 라플라시안 커널 [0, 1, 0; 1, -4, 1; 0, 1, 0]
+                const L = 4 * c - left - right - up - down;
+                sumL += L;
+                sumL2 += L * L;
+                sampleCount++;
+
+                if (Math.abs(L) >= 30) {
                   sharpEdgeCount++;
                 }
-                edgeCount++;
               }
             }
-            const sharpness = Math.round((edgeSum / Math.max(1, edgeCount)) * 10) / 10;
 
-            // C. 이전 프레임 대비 변화량 (손떨림 및 카메라 이동 감지)
+            const meanL = sumL / Math.max(1, sampleCount);
+            const varianceL = Math.max(0, (sumL2 / Math.max(1, sampleCount)) - (meanL * meanL));
+            const stdDevL = Math.round(Math.sqrt(varianceL) * 10) / 10; // 라플라시안 표준편차 (선명도 점수)
+
+            // C. 이전 프레임 대비 변화량 (손떨림 및 카메라 흔들림 감지)
             const currentLum = new Float32Array(sampleW * sampleH);
-            for (let y = 0; y < sampleH; y++) {
-              for (let x = 0; x < sampleW; x++) {
+            for (let y = 0; y < sampleH; y += 2) {
+              for (let x = 0; x < sampleW; x += 2) {
                 currentLum[y * sampleW + x] = getB(x, y);
               }
             }
@@ -408,52 +423,69 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
             if (prevFrameLumRef.current && prevFrameLumRef.current.length === sampleW * sampleH) {
               let diffSum = 0;
               let diffCount = 0;
-              for (let i = 0; i < sampleW * sampleH; i += 6) {
-                diffSum += Math.abs(currentLum[i] - prevFrameLumRef.current[i]);
-                diffCount++;
+              for (let y = 10; y < sampleH - 10; y += 4) {
+                for (let x = 10; x < sampleW - 10; x += 4) {
+                  const idx = y * sampleW + x;
+                  diffSum += Math.abs(currentLum[idx] - prevFrameLumRef.current[idx]);
+                  diffCount++;
+                }
               }
-              motionDiff = diffCount > 0 ? diffSum / diffCount : 0;
+              motionDiff = diffCount > 0 ? Math.round((diffSum / diffCount) * 10) / 10 : 0;
             }
             prevFrameLumRef.current = currentLum;
 
-            // D. 다단계 종합 판정
-            // 1) 명함 종이 존재: 어두운 배경(책상 등) 대비 밝기 > 75
-            const isCardPresent = avgBrightness > 75;
+            // D. 다단계 종합 판정 (엄격한 칼초점 기준치 적용)
+            // 1) 명함 종이 존재: 어두운 배경(책상 등) 대비 밝기 > 70
+            const isCardPresent = avgBrightness > 70;
 
-            // 2) 초점 선명도 판정:
-            // 글자 엣지(sharpEdgeCount)가 12개 이상이거나 평균 그래디언트 >= 11
-            const isSharp = sharpness >= 11 || sharpEdgeCount >= 12;
+            // 2) 칼초점 판정: 
+            // 흐릿한 사진(Out of Focus): stdDevL < 15, sharpEdgeCount < 20
+            // 칼처럼 또렷한 사진(Razor Sharp): stdDevL >= 24 이면서 엣지 30개 이상 검출 (또는 stdDevL >= 32)
+            const isRazorSharp = (stdDevL >= 24 && sharpEdgeCount >= 30) || (stdDevL >= 32);
 
-            // 3) 손떨림 방지: 프레임 간 변위가 7.0 미만으로 고정된 상태
-            const isStill = motionDiff < 7.0;
+            // 3) 손떨림 방지: 프레임 간 변위가 5.0 미만으로 스마트폰이 정지된 상태
+            const isStill = motionDiff < 5.0;
+
+            // 피크 선명도 추적
+            if (isRazorSharp && isStill) {
+              maxSharpnessRef.current = Math.max(maxSharpnessRef.current, stdDevL);
+            }
 
             // E. 초점 및 정렬 상태 전이
             if (!isCardPresent) {
               // 명함이 가이드라인 안에 없음
               setFocusState('searching');
+              setStatusMessage('가이드라인 안에 명함을 맞춰주세요');
               stabilityRef.current = Math.max(0.0, stabilityRef.current - 0.25);
-            } else if (!isSharp || !isStill) {
-              // 명함은 들어왔으나 아직 렌즈가 초점을 잡는 중이거나 손이 떨리는 중
+            } else if (!isStill) {
+              // 손이 떨리거나 카메라가 이동 중
               setFocusState('focusing');
-              // 초점이 덜 맞았을 때는 자동 촬영으로 바로 넘어가지 않도록 게이지를 20% 이내로 홀드
-              if (stabilityRef.current > 0.25) {
-                stabilityRef.current = Math.max(0.15, stabilityRef.current - 0.1);
+              setStatusMessage('흔들림 감지됨... 스마트폰을 멈춰주세요');
+              stabilityRef.current = Math.max(0.1, stabilityRef.current - 0.15);
+            } else if (!isRazorSharp) {
+              // 명함은 있으나 카메라 렌즈가 아직 초점을 잡는 중 (흐릿한 상태)
+              setFocusState('focusing');
+              setStatusMessage(`초점 맞추는 중... (선명도: ${Math.round(stdDevL)} / 24)`);
+              // 흐릿할 때는 절대 촬영 게이지가 올라가지 않도록 15% 이하로 차단
+              if (stabilityRef.current > 0.2) {
+                stabilityRef.current = Math.max(0.1, stabilityRef.current - 0.1);
               } else {
-                stabilityRef.current = Math.min(0.2, stabilityRef.current + 0.04);
+                stabilityRef.current = Math.min(0.15, stabilityRef.current + 0.02);
               }
             } else {
-              // 초점이 뚜렷하게 잡히고 손이 멈춘 상태 (고화질 촬영 조건 충족!)
+              // 조건 완벽 충족: 글자 획이 칼처럼 또렷하고 흔들림이 전혀 없는 상태!
               setFocusState('locked');
-              // 0.8초 ~ 1.0초간 흔들림 없이 유지되어야 100% 도달 (+0.12씩 누적)
-              stabilityRef.current = Math.min(1.0, stabilityRef.current + 0.12);
+              // 0.7~0.9초간 칼초점이 안정적으로 유지되어야 100% 도달 (+0.14씩 누적)
+              stabilityRef.current = Math.min(1.0, stabilityRef.current + 0.14);
+              setStatusMessage(`✨ 칼초점 고정 완료! 가만히 계세요 (${Math.round(stabilityRef.current * 100)}%)`);
             }
 
             const currentScore = stabilityRef.current;
             const progress = Math.round(currentScore * 100);
             setAlignProgress(progress);
-            setDebugMetric(`초점:${sharpness}(엣지:${sharpEdgeCount}) | 모션:${motionDiff.toFixed(1)} | 안정:${progress}%`);
+            setDebugMetric(`선명도:${stdDevL}/24 (엣지:${sharpEdgeCount}) | 모션:${motionDiff} | 안정:${progress}%`);
 
-            // F. 95% 이상 안정성 도달 시 찰칵 자동 촬영 발동! (초점이 100% 선명할 때만 찍힘)
+            // F. 95% 이상 안정성 도달 시 찰칵 자동 촬영 발동! (칼초점 보장)
             if (currentScore >= 0.95) {
               triggerCapture();
               return;
@@ -493,7 +525,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           </div>
           <div>
             <span className="text-sm font-bold tracking-tight">스마트 명함 스캐너</span>
-            <p className="text-[10px] text-slate-300">초점이 선명하게 맞으면 자동으로 촬영됩니다.</p>
+            <p className="text-[10px] text-slate-300">초점이 칼처럼 또렷해지면 자동으로 촬영됩니다.</p>
           </div>
         </div>
 
@@ -648,12 +680,12 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
                     {focusState === 'locked' ? (
                       <>
                         <Check className="w-3.5 h-3.5 stroke-[3]" />
-                        <span>초점 고정 완료! 가만히 계세요 ({alignProgress}%)</span>
+                        <span>{statusMessage || `✨ 칼초점 고정 완료! (${alignProgress}%)`}</span>
                       </>
                     ) : focusState === 'focusing' ? (
                       <>
                         <Scan className="w-3.5 h-3.5 text-amber-200 animate-pulse" />
-                        <span>초점을 맞추는 중입니다... 흔들리지 마세요</span>
+                        <span>{statusMessage || '초점을 맞추는 중입니다... 흔들리지 마세요'}</span>
                       </>
                     ) : (
                       <>
