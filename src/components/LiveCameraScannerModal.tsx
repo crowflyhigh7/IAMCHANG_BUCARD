@@ -43,10 +43,10 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
   const [hasTorch, setHasTorch] = useState(false);
   const [isTorchOn, setIsTorchOn] = useState(false);
 
-  // Animation frame ref
+  // Animation frame ref & Hysteresis stability tracker
   const animFrameId = useRef<number | null>(null);
   const lastCheckTime = useRef<number>(0);
-  const alignedFrameCount = useRef<number>(0);
+  const stabilityRef = useRef<number>(0); // 0.0 to 1.0 (smooth accumulator)
 
   // 1. 카메라 시작 (다단계 제약조건 폴백으로 100% 연결 보장)
   const startCamera = useCallback(async () => {
@@ -144,7 +144,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
       stream.getTracks().forEach((track) => track.stop());
       setStream(null);
     }
-    alignedFrameCount.current = 0;
+    stabilityRef.current = 0;
     setIsCardAligned(false);
     setAlignProgress(0);
     setIsLoadingCamera(false);
@@ -202,7 +202,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
     setIsCapturing(false);
   }, [isCapturing, onCapture, stopCamera]);
 
-  // 4. 실시간 가이드라인 정렬 및 손떨림 감지 루프
+  // 4. 실시간 가이드라인 정렬 및 손떨림 감지 루프 (안정화 필터 적용으로 깜빡임 원천 차단)
   useEffect(() => {
     if (!isOpen || !hasPermission || !videoRef.current) return;
 
@@ -223,86 +223,95 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           const videoRect = video.getBoundingClientRect();
           const guideRect = guide.getBoundingClientRect();
 
-          // 가이드 박스가 비디오 뷰포트 내 차지하는 상대 비율
-          const guideRelLeft = (guideRect.left - videoRect.left) / videoRect.width;
-          const guideRelTop = (guideRect.top - videoRect.top) / videoRect.height;
-          const guideRelWidth = guideRect.width / videoRect.width;
-          const guideRelHeight = guideRect.height / videoRect.height;
+          const W_screen = videoRect.width;
+          const H_screen = videoRect.height;
+          const W_vid = video.videoWidth || 1920;
+          const H_vid = video.videoHeight || 1080;
 
-          // 오프스크린 캔버스에 가이드 영역 주변을 샘플링 (120x70)
-          const sampleW = 120;
-          const sampleH = 70;
+          // object-cover 스타일의 정확한 스케일 및 오프셋 역산
+          const scale = Math.max(W_screen / W_vid, H_screen / H_vid);
+          const renderedW = W_vid * scale;
+          const renderedH = H_vid * scale;
+          const offsetX = (W_screen - renderedW) / 2;
+          const offsetY = (H_screen - renderedH) / 2;
+
+          // 가이드 박스의 비디오 프레임 내 정확한 픽셀 좌표
+          const guideXonScreen = guideRect.left - videoRect.left;
+          const guideYonScreen = guideRect.top - videoRect.top;
+
+          const srcX = Math.max(0, Math.round((guideXonScreen - offsetX) / scale));
+          const srcY = Math.max(0, Math.round((guideYonScreen - offsetY) / scale));
+          const srcW = Math.min(W_vid - srcX, Math.round(guideRect.width / scale));
+          const srcH = Math.min(H_vid - srcY, Math.round(guideRect.height / scale));
+
+          // 100x60 크기로 다운샘플링하여 안정성 분석
+          const sampleW = 100;
+          const sampleH = 60;
           const canvas = canvasRef.current || document.createElement('canvas');
           canvas.width = sampleW;
           canvas.height = sampleH;
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-          if (ctx) {
-            const vidW = video.videoWidth;
-            const vidH = video.videoHeight;
+          if (ctx && srcW > 0 && srcH > 0) {
+            ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, sampleW, sampleH);
+            const imgData = ctx.getImageData(0, 0, sampleW, sampleH);
+            const data = imgData.data;
 
-            const srcX = Math.max(0, guideRelLeft * vidW);
-            const srcY = Math.max(0, guideRelTop * vidH);
-            const srcW = Math.min(vidW - srcX, guideRelWidth * vidW);
-            const srcH = Math.min(vidH - srcY, guideRelHeight * vidH);
+            const getB = (x: number, y: number) => {
+              const i = (y * sampleW + x) * 4;
+              return (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+            };
 
-            if (srcW > 0 && srcH > 0) {
-              ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, sampleW, sampleH);
-              const imgData = ctx.getImageData(0, 0, sampleW, sampleH);
-              const data = imgData.data;
+            // 가이드라인 내부의 평균 밝기 및 텍스트 대비(표준편차) 측정
+            let sum = 0;
+            let count = 0;
+            const values: number[] = [];
 
-              const getB = (x: number, y: number) => {
-                const i = (y * sampleW + x) * 4;
-                return (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
-              };
-
-              // 1) 내부 중앙부 평균 밝기 (종이)
-              let innerSum = 0;
-              let innerCount = 0;
-              for (let y = Math.round(sampleH * 0.25); y < sampleH * 0.75; y += 4) {
-                for (let x = Math.round(sampleW * 0.25); x < sampleW * 0.75; x += 6) {
-                  innerSum += getB(x, y);
-                  innerCount++;
-                }
+            for (let y = 10; y < sampleH - 10; y += 4) {
+              for (let x = 10; x < sampleW - 10; x += 5) {
+                const b = getB(x, y);
+                sum += b;
+                values.push(b);
+                count++;
               }
-              const innerAvg = innerSum / Math.max(1, innerCount);
+            }
 
-              // 2) 가이드라인 안쪽 테두리 밝기 (명함 종이가 꽉 찼는지 확인)
-              let borderSum = 0;
-              let borderCount = 0;
-              for (let x = 10; x < sampleW - 10; x += 8) {
-                borderSum += getB(x, 6);
-                borderSum += getB(x, sampleH - 7);
-                borderCount += 2;
-              }
-              for (let y = 8; y < sampleH - 8; y += 6) {
-                borderSum += getB(6, y);
-                borderSum += getB(sampleW - 7, y);
-                borderCount += 2;
-              }
-              const borderAvg = borderSum / Math.max(1, borderCount);
+            const avgBrightness = sum / Math.max(1, count);
+            let variance = 0;
+            for (const val of values) {
+              variance += Math.pow(val - avgBrightness, 2);
+            }
+            const stdDev = Math.sqrt(variance / Math.max(1, count));
 
-              // 명함이 가이드라인 박스를 채우고 있는지 조건 판정
-              const isFilled = innerAvg > 105 && borderAvg > 90 && Math.abs(innerAvg - borderAvg) < 60;
+            // 가이드라인 내에 명함이 안정적으로 들어와 있는지 판정:
+            // 1. 평균 밝기가 명함 종이 수준 (> 90)
+            // 2. 내부 텍스트나 인쇄물로 인한 적정 대비가 존재함 (stdDev > 5, 빈 단색 벽 제외)
+            const isCardPresent = avgBrightness > 90 && stdDev > 5;
 
-              if (isFilled) {
-                alignedFrameCount.current += 1;
-                setIsCardAligned(true);
-                const progress = Math.min(100, Math.round((alignedFrameCount.current / 5) * 100));
-                setAlignProgress(progress);
+            // Hysteresis 히스테리시스 필터링 (깜빡임 원천 방지)
+            if (isCardPresent) {
+              // 감지 시 부드럽게 누적 (+0.25) -> 약 0.5초(4~5프레임) 유지 시 1.0 도달
+              stabilityRef.current = Math.min(1.0, stabilityRef.current + 0.25);
+            } else {
+              // 미감지 시 천천히 감소 (-0.08) -> 일시적 흔들림이나 프레임 드랍에도 깜빡이지 않음
+              stabilityRef.current = Math.max(0.0, stabilityRef.current - 0.08);
+            }
 
-                if (alignedFrameCount.current >= 5) {
-                  // 자동 셔터 발동!
-                  triggerCapture();
-                  return;
-                }
-              } else {
-                alignedFrameCount.current = Math.max(0, alignedFrameCount.current - 1);
-                setAlignProgress(Math.round((alignedFrameCount.current / 5) * 100));
-                if (alignedFrameCount.current === 0) {
-                  setIsCardAligned(false);
-                }
-              }
+            const currentScore = stabilityRef.current;
+            const progress = Math.round(currentScore * 100);
+            setAlignProgress(progress);
+
+            // 상태 전환 히스테리시스: 30% 이상일 때 켜지고, 10% 이하로 떨어져야 꺼짐
+            if (currentScore >= 0.3) {
+              setIsCardAligned(true);
+            } else if (currentScore <= 0.1) {
+              setIsCardAligned(false);
+            }
+
+            // 95% 이상 안정화 시 자동 셔터 발동!
+            if (currentScore >= 0.95) {
+              triggerCapture();
+              return;
             }
           }
         }
@@ -445,7 +454,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
         {/* Dark Vignette Mask Outside Guideline Box */}
         {!permissionError && (
           <div className="absolute inset-0 pointer-events-none z-10">
-            {/* Guide Box */}
+            {/* Guide Box (외곽 치수는 불변으로 고정하여 흔들림/깜빡임 루프 제거) */}
             <div className="absolute inset-0 flex items-center justify-center p-4">
               <div
                 ref={guideBoxRef}
@@ -453,49 +462,49 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
                   width: 'min(86vw, 420px)',
                   aspectRatio: '1.68 / 1', // 표준 명함 비율 (90mm x 54mm)
                 }}
-                className={`relative rounded-3xl transition-all duration-300 ${
+                className={`relative rounded-3xl border-[3px] transition-colors duration-200 ${
                   isCardAligned
-                    ? 'border-4 border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.65),0_0_30px_rgba(52,211,153,0.6)] scale-[1.01]'
-                    : 'border-2 border-white/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.6)]'
+                    ? 'border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.65),0_0_25px_rgba(52,211,153,0.5)]'
+                    : 'border-white/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.6)]'
                 }`}
               >
                 {/* 4 Corner Accents */}
-                <div className={`absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 rounded-tl-xl transition-colors ${
+                <div className={`absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 rounded-tl-xl transition-colors duration-200 ${
                   isCardAligned ? 'border-emerald-300' : 'border-blue-400'
                 }`} />
-                <div className={`absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 rounded-tr-xl transition-colors ${
+                <div className={`absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 rounded-tr-xl transition-colors duration-200 ${
                   isCardAligned ? 'border-emerald-300' : 'border-blue-400'
                 }`} />
-                <div className={`absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 rounded-bl-xl transition-colors ${
+                <div className={`absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 rounded-bl-xl transition-colors duration-200 ${
                   isCardAligned ? 'border-emerald-300' : 'border-blue-400'
                 }`} />
-                <div className={`absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 rounded-br-xl transition-colors ${
+                <div className={`absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 rounded-br-xl transition-colors duration-200 ${
                   isCardAligned ? 'border-emerald-300' : 'border-blue-400'
                 }`} />
 
                 {/* Auto-shutter progress bar (when aligned) */}
-                {isCardAligned && (
-                  <div className="absolute top-0 left-0 right-0 h-1.5 bg-emerald-950/60 rounded-t-2xl overflow-hidden">
-                    <div
-                      className="h-full bg-emerald-400 transition-all duration-100 ease-out"
-                      style={{ width: `${alignProgress}%` }}
-                    />
-                  </div>
-                )}
+                <div className="absolute top-0 left-0 right-0 h-1.5 bg-black/40 rounded-t-2xl overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-100 ease-out ${
+                      isCardAligned ? 'bg-emerald-400' : 'bg-transparent'
+                    }`}
+                    style={{ width: `${alignProgress}%` }}
+                  />
+                </div>
 
                 {/* Center Status Badge */}
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div
-                    className={`px-3.5 py-1.5 rounded-full text-xs font-bold backdrop-blur-md transition-all duration-300 flex items-center gap-1.5 shadow-lg ${
+                    className={`px-4 py-2 rounded-full text-xs font-bold backdrop-blur-md transition-colors duration-200 flex items-center gap-1.5 shadow-lg ${
                       isCardAligned
-                        ? 'bg-emerald-500/90 text-white scale-105 animate-pulse'
-                        : 'bg-black/55 text-white/90 border border-white/20'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-black/60 text-white/90 border border-white/20'
                     }`}
                   >
                     {isCardAligned ? (
                       <>
                         <Check className="w-3.5 h-3.5 stroke-[3]" />
-                        <span>명함 감지됨! 고정해주세요 ({alignProgress}%)</span>
+                        <span>명함 감지 중... 고정해주세요 ({alignProgress}%)</span>
                       </>
                     ) : (
                       <>
@@ -528,7 +537,7 @@ export const LiveCameraScannerModal: React.FC<LiveCameraScannerModalProps> = ({
           <span className="text-[11px] font-medium">앨범 선택</span>
         </button>
 
-        {/* Main Shutter Button (수동 셔터 - 언제든 즉시 찰칵) */}
+        {/* Main Shutter Button (수동 셔터 - 사용자가 원할 때 언제든 즉시 찰칵) */}
         <button
           onClick={triggerCapture}
           disabled={isCapturing || !hasPermission}
