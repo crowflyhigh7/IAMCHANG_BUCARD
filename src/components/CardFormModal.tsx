@@ -28,6 +28,7 @@ import {
 } from '../utils/geminiOcr';
 import { uploadCardImage } from '../utils/api';
 import { ImageCropModal } from './ImageCropModal';
+import { LiveCameraScannerModal } from './LiveCameraScannerModal';
 import { CropRect, detectCardBounds, cropImageByRect } from '../utils/imageCrop';
 
 interface CardFormModalProps {
@@ -77,6 +78,9 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
   const [isCropModalOpen, setIsCropModalOpen] = useState(false);
   const [rawPhotoDataUrl, setRawPhotoDataUrl] = useState<string | null>(null);
   const [detectedCropRect, setDetectedCropRect] = useState<CropRect | null>(null);
+
+  // Live Real-time Camera Scanner state
+  const [isLiveCameraOpen, setIsLiveCameraOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -225,6 +229,33 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       .catch((err) => console.warn('R2 upload failed:', err));
   };
 
+  // 3단계: 실시간 카메라 스캐너에서 촬영되었을 때 (자동 또는 수동 셔터)
+  const handleLiveCameraCapture = async (dataUrl: string) => {
+    setIsLiveCameraOpen(false);
+    setRawPhotoDataUrl(dataUrl);
+    setIsScanning(true);
+    setScanStatusMessage('사진 분석 및 스마트 명함 영역 자동 감지 중...');
+
+    const img = new Image();
+    img.onload = async () => {
+      try {
+        const bounds = detectCardBounds(img);
+        setDetectedCropRect(bounds);
+        const { croppedDataUrl, croppedBase64 } = await cropImageByRect(dataUrl, bounds);
+        await processCroppedImage(croppedDataUrl, croppedBase64);
+      } catch (cropErr) {
+        console.warn('Auto-crop error, falling back to full image:', cropErr);
+        const base64 = dataUrl.split(',')[1] || '';
+        await processCroppedImage(dataUrl, base64);
+      }
+    };
+    img.onerror = async () => {
+      const base64 = dataUrl.split(',')[1] || '';
+      await processCroppedImage(dataUrl, base64);
+    };
+    img.src = dataUrl;
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
@@ -304,15 +335,15 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
               </div>
 
               <div className="flex items-center gap-2">
-                {/* Mobile Camera Direct Button */}
+                {/* Real-time Camera Scanner Button */}
                 <button
                   type="button"
                   disabled={isScanning}
-                  onClick={() => cameraInputRef.current?.click()}
+                  onClick={() => setIsLiveCameraOpen(true)}
                   className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-600/20 transition active:scale-95 disabled:opacity-50"
                 >
-                  <Camera className="w-4 h-4" />
-                  <span>카메라 촬영</span>
+                  <Camera className="w-4 h-4 stroke-[2.5]" />
+                  <span>스마트 자동 촬영</span>
                 </button>
 
                 {/* Photo Album Button */}
@@ -648,6 +679,14 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
         initialCropRect={detectedCropRect || undefined}
         onClose={() => setIsCropModalOpen(false)}
         onCropComplete={handleCropComplete}
+      />
+
+      {/* Real-time Live Camera Scanner Modal */}
+      <LiveCameraScannerModal
+        isOpen={isLiveCameraOpen}
+        onClose={() => setIsLiveCameraOpen(false)}
+        onCapture={handleLiveCameraCapture}
+        onFallbackToFile={() => fileInputRef.current?.click()}
       />
     </>
   );
