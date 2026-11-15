@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { 
   X, 
   Phone, 
@@ -15,6 +15,9 @@ import {
   Star,
   FileText,
   Maximize2,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
   Image as ImageIcon
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -41,6 +44,140 @@ export const CardModal: React.FC<CardModalProps> = ({
   const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const theme = THEME_CONFIGS[card.theme] || THEME_CONFIGS['modern-blue'];
   const hasPhoto = Boolean(card.avatarUrl && card.avatarUrl.trim().length > 0);
+
+  // 실물 명함 사진 줌(Zoom) 및 드래그(Pan) 상태
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const isDraggingRef = useRef(false);
+  const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const initialPinchDistRef = useRef<number | null>(null);
+  const initialZoomRef = useRef<number>(1);
+  const lastTapTimeRef = useRef<number>(0);
+
+  const handleZoomIn = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setZoomLevel((prev) => Math.min(3.5, Math.round((prev + 0.5) * 10) / 10));
+  };
+
+  const handleZoomOut = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setZoomLevel((prev) => {
+      const next = Math.max(1, Math.round((prev - 0.5) * 10) / 10);
+      if (next === 1) setPanOffset({ x: 0, y: 0 });
+      return next;
+    });
+  };
+
+  const handleResetZoom = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setZoomLevel(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+
+  const closePhotoZoom = () => {
+    setIsPhotoZoomed(false);
+    setZoomLevel(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+
+  const handleImageDoubleTap = (e: React.MouseEvent | React.TouchEvent) => {
+    e.stopPropagation();
+    if (zoomLevel > 1) {
+      setZoomLevel(1);
+      setPanOffset({ x: 0, y: 0 });
+    } else {
+      setZoomLevel(2.2);
+    }
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.stopPropagation();
+    if (e.deltaY < 0) {
+      setZoomLevel((prev) => Math.min(3.5, Math.round((prev + 0.25) * 100) / 100));
+    } else {
+      setZoomLevel((prev) => {
+        const next = Math.max(1, Math.round((prev - 0.25) * 100) / 100);
+        if (next === 1) setPanOffset({ x: 0, y: 0 });
+        return next;
+      });
+    }
+  };
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      initialPinchDistRef.current = dist;
+      initialZoomRef.current = zoomLevel;
+    } else if (e.touches.length === 1) {
+      const now = performance.now();
+      if (now - lastTapTimeRef.current < 300) {
+        handleImageDoubleTap(e);
+        lastTapTimeRef.current = 0;
+        return;
+      }
+      lastTapTimeRef.current = now;
+
+      if (zoomLevel > 1) {
+        isDraggingRef.current = true;
+        dragStartRef.current = {
+          x: e.touches[0].clientX - panOffset.x,
+          y: e.touches[0].clientY - panOffset.y,
+        };
+      }
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2 && initialPinchDistRef.current !== null) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const scaleChange = dist / initialPinchDistRef.current;
+      const nextZoom = Math.min(3.5, Math.max(1, initialZoomRef.current * scaleChange));
+      setZoomLevel(Math.round(nextZoom * 100) / 100);
+      if (nextZoom === 1) setPanOffset({ x: 0, y: 0 });
+    } else if (e.touches.length === 1 && isDraggingRef.current && zoomLevel > 1) {
+      const newX = e.touches[0].clientX - dragStartRef.current.x;
+      const newY = e.touches[0].clientY - dragStartRef.current.y;
+      setPanOffset({ x: newX, y: newY });
+    }
+  };
+
+  const handleTouchEnd = () => {
+    initialPinchDistRef.current = null;
+    isDraggingRef.current = false;
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (zoomLevel > 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      isDraggingRef.current = true;
+      dragStartRef.current = {
+        x: e.clientX - panOffset.x,
+        y: e.clientY - panOffset.y,
+      };
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (isDraggingRef.current && zoomLevel > 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      setPanOffset({
+        x: e.clientX - dragStartRef.current.x,
+        y: e.clientY - dragStartRef.current.y,
+      });
+    }
+  };
+
+  const handleMouseUp = () => {
+    isDraggingRef.current = false;
+  };
 
   const handleCopy = (text: string, fieldName: string) => {
     navigator.clipboard.writeText(text);
@@ -354,14 +491,14 @@ export const CardModal: React.FC<CardModalProps> = ({
         </div>
       </div>
 
-      {/* Fullscreen Photo Lightbox Modal (z-[110]으로 모달 최상단에 완전 표시) */}
+      {/* Fullscreen Photo Lightbox Modal (z-[110]으로 모달 최상단에 완전 표시 & 핀치/더블탭/버튼 줌 지원) */}
       {isPhotoZoomed && hasPhoto && (
         <div 
-          className="fixed inset-0 z-[110] bg-black/95 flex flex-col justify-between p-4 sm:p-6 animate-fade-in touch-none select-none cursor-zoom-out"
-          onClick={() => setIsPhotoZoomed(false)}
+          className="fixed inset-0 z-[110] bg-black/95 flex flex-col justify-between p-4 sm:p-6 animate-fade-in touch-none select-none"
+          onClick={closePhotoZoom}
         >
           {/* Top Bar */}
-          <div className="w-full flex items-center justify-between text-white z-10 pt-safe">
+          <div className="w-full flex items-center justify-between text-white z-20 pt-safe">
             <div className="flex items-center gap-2">
               <span className="text-base font-bold">{card.name}</span>
               <span className="text-xs text-slate-400">· 실물 명함 원본</span>
@@ -379,7 +516,7 @@ export const CardModal: React.FC<CardModalProps> = ({
                 <Download className="w-5 h-5" />
               </a>
               <button
-                onClick={() => setIsPhotoZoomed(false)}
+                onClick={closePhotoZoom}
                 className="p-2.5 rounded-full bg-white/20 text-white hover:bg-white/30 transition active:scale-95"
                 title="닫기"
               >
@@ -388,20 +525,86 @@ export const CardModal: React.FC<CardModalProps> = ({
             </div>
           </div>
 
-          {/* Centered Image Viewport */}
-          <div className="flex-1 w-full flex items-center justify-center p-2 min-h-0">
+          {/* Centered Interactive Zoom Viewport */}
+          <div 
+            className="flex-1 w-full flex items-center justify-center p-2 min-h-0 overflow-hidden relative cursor-grab active:cursor-grabbing"
+            onWheel={handleWheel}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onClick={(e) => {
+              if (e.target === e.currentTarget && !isDraggingRef.current) {
+                closePhotoZoom();
+              }
+            }}
+          >
             <img
               src={card.avatarUrl}
               alt={`${card.name} 명함 원본`}
-              className="max-w-full max-h-full object-contain rounded-2xl shadow-2xl transition-transform"
+              style={{
+                transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomLevel})`,
+                transition: isDraggingRef.current ? 'none' : 'transform 0.15s ease-out',
+                maxHeight: '85vh',
+                maxWidth: '92vw',
+              }}
+              className="object-contain rounded-2xl shadow-2xl select-none"
+              onDoubleClick={handleImageDoubleTap}
               onClick={(e) => e.stopPropagation()}
+              draggable={false}
             />
           </div>
 
-          {/* Bottom Hint */}
-          <div className="pb-safe text-center py-2">
-            <span className="text-xs text-slate-400 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-md">
-              화면의 빈 공간을 터치하면 닫힙니다
+          {/* Bottom Floating Zoom Controls Bar */}
+          <div 
+            className="pb-safe z-20 flex flex-col items-center gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Interactive Zoom Controls Pill */}
+            <div className="flex items-center gap-1.5 p-1.5 rounded-2xl bg-slate-900/85 border border-slate-700/80 shadow-2xl backdrop-blur-md text-white">
+              <button
+                onClick={handleZoomOut}
+                disabled={zoomLevel <= 1}
+                className="p-2 rounded-xl hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-transparent transition active:scale-90"
+                title="축소"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={handleResetZoom}
+                className="px-2.5 py-1 rounded-lg text-xs font-mono font-bold hover:bg-white/15 transition active:scale-95 text-emerald-400"
+                title="100% 원본 크기로 리셋"
+              >
+                {Math.round(zoomLevel * 100)}%
+              </button>
+
+              <button
+                onClick={handleZoomIn}
+                disabled={zoomLevel >= 3.5}
+                className="p-2 rounded-xl hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-transparent transition active:scale-90"
+                title="확대"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+
+              {zoomLevel > 1 && (
+                <button
+                  onClick={handleResetZoom}
+                  className="flex items-center gap-1 pl-2 pr-2.5 py-1 text-xs text-slate-300 hover:text-white hover:bg-white/15 rounded-lg border-l border-slate-700 transition"
+                  title="원본 비율 복귀"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>원복</span>
+                </button>
+              )}
+            </div>
+
+            {/* Sub-hint */}
+            <span className="text-[11px] text-slate-400">
+              더블 탭 또는 두 손가락 핀치 줌으로 확대 / 드래그하여 이동
             </span>
           </div>
         </div>
