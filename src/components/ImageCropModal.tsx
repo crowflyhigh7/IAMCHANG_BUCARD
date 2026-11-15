@@ -7,11 +7,12 @@ import {
   Sparkles,
   Move
 } from 'lucide-react';
-import { CropRect, detectCardBounds, cropImageByRect } from '../utils/imageCrop';
+import { CropRect, detectCardBounds, cropImageByRect, rotateDataUrl } from '../utils/imageCrop';
 
 interface ImageCropModalProps {
   isOpen: boolean;
   imageDataUrl: string | null;
+  initialCropRect?: CropRect;
   onClose: () => void;
   onCropComplete: (croppedDataUrl: string, croppedBase64: string) => void;
 }
@@ -19,10 +20,13 @@ interface ImageCropModalProps {
 export const ImageCropModal: React.FC<ImageCropModalProps> = ({
   isOpen,
   imageDataUrl,
+  initialCropRect,
   onClose,
   onCropComplete,
 }) => {
-  const [cropRect, setCropRect] = useState<CropRect>({ x: 0.1, y: 0.15, width: 0.8, height: 0.7 });
+  const [cropRect, setCropRect] = useState<CropRect>(
+    initialCropRect || { x: 0.1, y: 0.25, width: 0.8, height: 0.5 }
+  );
   const [rotation, setRotation] = useState<number>(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -37,14 +41,18 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
   useEffect(() => {
     if (imageDataUrl && isOpen) {
       setRotation(0);
-      const img = new Image();
-      img.onload = () => {
-        const bounds = detectCardBounds(img);
-        setCropRect(bounds);
-      };
-      img.src = imageDataUrl;
+      if (initialCropRect) {
+        setCropRect(initialCropRect);
+      } else {
+        const img = new Image();
+        img.onload = () => {
+          const bounds = detectCardBounds(img);
+          setCropRect(bounds);
+        };
+        img.src = imageDataUrl;
+      }
     }
-  }, [imageDataUrl, isOpen]);
+  }, [imageDataUrl, isOpen, initialCropRect]);
 
   if (!isOpen || !imageDataUrl) return null;
 
@@ -76,23 +84,23 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       next.x = Math.max(0, Math.min(1 - next.width, initialRect.x + dx));
       next.y = Math.max(0, Math.min(1 - next.height, initialRect.y + dy));
     } else if (dragHandle === 'se') {
-      next.width = Math.max(0.2, Math.min(1 - next.x, initialRect.width + dx));
-      next.height = Math.max(0.15, Math.min(1 - next.y, initialRect.height + dy));
+      next.width = Math.max(0.15, Math.min(1 - next.x, initialRect.width + dx));
+      next.height = Math.max(0.1, Math.min(1 - next.y, initialRect.height + dy));
     } else if (dragHandle === 'sw') {
-      const newX = Math.max(0, Math.min(initialRect.x + initialRect.width - 0.2, initialRect.x + dx));
+      const newX = Math.max(0, Math.min(initialRect.x + initialRect.width - 0.15, initialRect.x + dx));
       next.width = initialRect.width + (initialRect.x - newX);
       next.x = newX;
-      next.height = Math.max(0.15, Math.min(1 - next.y, initialRect.height + dy));
+      next.height = Math.max(0.1, Math.min(1 - next.y, initialRect.height + dy));
     } else if (dragHandle === 'nw') {
-      const newX = Math.max(0, Math.min(initialRect.x + initialRect.width - 0.2, initialRect.x + dx));
-      const newY = Math.max(0, Math.min(initialRect.y + initialRect.height - 0.15, initialRect.y + dy));
+      const newX = Math.max(0, Math.min(initialRect.x + initialRect.width - 0.15, initialRect.x + dx));
+      const newY = Math.max(0, Math.min(initialRect.y + initialRect.height - 0.1, initialRect.y + dy));
       next.width = initialRect.width + (initialRect.x - newX);
       next.height = initialRect.height + (initialRect.y - newY);
       next.x = newX;
       next.y = newY;
     } else if (dragHandle === 'ne') {
-      const newY = Math.max(0, Math.min(initialRect.y + initialRect.height - 0.15, initialRect.y + dy));
-      next.width = Math.max(0.2, Math.min(1 - next.x, initialRect.width + dx));
+      const newY = Math.max(0, Math.min(initialRect.y + initialRect.height - 0.1, initialRect.y + dy));
+      next.width = Math.max(0.15, Math.min(1 - next.x, initialRect.width + dx));
       next.height = initialRect.height + (initialRect.y - newY);
       next.y = newY;
     }
@@ -109,7 +117,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
 
   // 자르기 실행
   const handleApplyCrop = async () => {
-    // 만약 회전이 들어가 있다면 회전된 캔버스를 먼저 생성
     let currentDataUrl = imageDataUrl;
     if (rotation !== 0) {
       currentDataUrl = await rotateDataUrl(imageDataUrl, rotation);
@@ -122,7 +129,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 z-60 flex flex-col bg-slate-950/90 backdrop-blur-md animate-fade-in touch-none select-none"
+      className="fixed inset-0 z-60 flex flex-col bg-slate-950/92 backdrop-blur-md animate-fade-in touch-none select-none"
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
     >
@@ -134,7 +141,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold">명함 영역 자르기 (Auto-Crop)</h3>
-            <p className="text-[11px] text-slate-400">책상 배경을 제외하고 명함 테두리를 맞춰주세요.</p>
+            <p className="text-[11px] text-slate-400">책상 배경을 제외하고 명함 테두리에 맞추어 저장합니다.</p>
           </div>
         </div>
 
@@ -159,7 +166,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       <div className="flex-1 flex items-center justify-center p-3 sm:p-6 overflow-hidden relative">
         <div 
           ref={containerRef}
-          className="relative max-w-full max-h-[70vh] flex items-center justify-center shadow-2xl rounded-lg overflow-hidden border border-slate-800"
+          className="relative inline-block shadow-2xl rounded-xl overflow-hidden border border-slate-700/80 touch-none max-w-full max-h-[70vh]"
         >
           {/* Image */}
           <img
@@ -167,11 +174,11 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
             src={imageDataUrl}
             alt="명함 자르기"
             style={{ transform: `rotate(${rotation}deg)` }}
-            className="max-w-full max-h-[70vh] object-contain block pointer-events-none transition-transform duration-200"
+            className="w-auto h-auto max-w-[85vw] max-h-[65vh] block select-none pointer-events-none transition-transform duration-200"
           />
 
           {/* Dark Overlay Outside Crop Area */}
-          <div className="absolute inset-0 pointer-events-none bg-black/55" />
+          <div className="absolute inset-0 pointer-events-none bg-black/60" />
 
           {/* Transparent Crop Box Area */}
           <div
@@ -181,7 +188,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
               width: `${cropRect.width * 100}%`,
               height: `${cropRect.height * 100}%`,
             }}
-            className="absolute border-2 border-cyan-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.55)] cursor-move transition-shadow"
+            className="absolute border-2 border-cyan-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.60)] cursor-move transition-shadow"
             onPointerDown={(e) => handlePointerDown('move', e)}
           >
             {/* Guide Grid lines */}
@@ -192,26 +199,26 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
               <div className="border-r border-b border-white/60" />
               <div className="border-r border-b border-white/60" />
               <div className="border-b border-white/60" />
-              <div className="border-r border-white/60" />
-              <div className="border-r border-white/60" />
+              <div className="border-r border-b border-white/60" />
+              <div className="border-r border-b border-white/60" />
               <div />
             </div>
 
             {/* Corner Handles */}
             <div
-              className="absolute -top-2.5 -left-2.5 w-6 h-6 bg-cyan-400 rounded-full border-2 border-white shadow-md cursor-nw-resize active:scale-125"
+              className="absolute -top-3.5 -left-3.5 w-7 h-7 bg-cyan-400 rounded-full border-2 border-white shadow-lg cursor-nw-resize active:scale-125 touch-none"
               onPointerDown={(e) => handlePointerDown('nw', e)}
             />
             <div
-              className="absolute -top-2.5 -right-2.5 w-6 h-6 bg-cyan-400 rounded-full border-2 border-white shadow-md cursor-ne-resize active:scale-125"
+              className="absolute -top-3.5 -right-3.5 w-7 h-7 bg-cyan-400 rounded-full border-2 border-white shadow-lg cursor-ne-resize active:scale-125 touch-none"
               onPointerDown={(e) => handlePointerDown('ne', e)}
             />
             <div
-              className="absolute -bottom-2.5 -left-2.5 w-6 h-6 bg-cyan-400 rounded-full border-2 border-white shadow-md cursor-sw-resize active:scale-125"
+              className="absolute -bottom-3.5 -left-3.5 w-7 h-7 bg-cyan-400 rounded-full border-2 border-white shadow-lg cursor-sw-resize active:scale-125 touch-none"
               onPointerDown={(e) => handlePointerDown('sw', e)}
             />
             <div
-              className="absolute -bottom-2.5 -right-2.5 w-6 h-6 bg-cyan-400 rounded-full border-2 border-white shadow-md cursor-se-resize active:scale-125"
+              className="absolute -bottom-3.5 -right-3.5 w-7 h-7 bg-cyan-400 rounded-full border-2 border-white shadow-lg cursor-se-resize active:scale-125 touch-none"
               onPointerDown={(e) => handlePointerDown('se', e)}
             />
 
@@ -246,29 +253,3 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
     </div>
   );
 };
-
-// 회전 유틸
-async function rotateDataUrl(sourceDataUrl: string, degrees: number): Promise<string> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return resolve(sourceDataUrl);
-
-      if (degrees === 90 || degrees === 270) {
-        canvas.width = img.height;
-        canvas.height = img.width;
-      } else {
-        canvas.width = img.width;
-        canvas.height = img.height;
-      }
-
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((degrees * Math.PI) / 180);
-      ctx.drawImage(img, -img.width / 2, -img.height / 2);
-      resolve(canvas.toDataURL('image/jpeg', 0.92));
-    };
-    img.src = sourceDataUrl;
-  });
-}

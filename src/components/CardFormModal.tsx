@@ -28,6 +28,7 @@ import {
 } from '../utils/geminiOcr';
 import { uploadCardImage } from '../utils/api';
 import { ImageCropModal } from './ImageCropModal';
+import { CropRect, detectCardBounds, cropImageByRect } from '../utils/imageCrop';
 
 interface CardFormModalProps {
   initialData?: BusinessCardData | null;
@@ -75,6 +76,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
   // Interactive Crop Modal state
   const [isCropModalOpen, setIsCropModalOpen] = useState(false);
   const [rawPhotoDataUrl, setRawPhotoDataUrl] = useState<string | null>(null);
+  const [detectedCropRect, setDetectedCropRect] = useState<CropRect | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -115,28 +117,21 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
   if (!isOpen) return null;
 
-  // 1단계: 카메라 촬영 또는 사진 선택 시 크롭 모달 열기
-  const handleImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    try {
-      const { dataUrl } = await resizeImageToDataUrl(file);
-      setRawPhotoDataUrl(dataUrl);
-      setIsCropModalOpen(true);
-    } catch (err: any) {
-      alert(err.message || '사진 로딩에 실패했습니다.');
-    } finally {
-      e.target.value = '';
-    }
-  };
-
-  // 2단계: 크롭 완료 후 깨끗한 명함 이미지로 AI 분석 및 R2 업로드 진행
-  const handleCropComplete = async (croppedDataUrl: string, croppedBase64: string) => {
+  // 오려낸 깨끗한 명함 사진으로 R2 업로드 및 Gemini OCR 수행
+  const processCroppedImage = async (croppedDataUrl: string, croppedBase64: string) => {
     setScannedImagePreview(croppedDataUrl);
 
+    // 1. 오려낸 명함을 Cloudflare R2에 비동기 업로드
+    uploadCardImage(croppedBase64, 'image/jpeg')
+      .then((r2Url) => {
+        if (r2Url) setScannedImagePreview(r2Url);
+      })
+      .catch((err) => console.warn('R2 upload failed:', err));
+
+    // 2. Gemini API 키 확인 후 AI 텍스트 판독
     const apiKey = getGeminiApiKey();
     if (!apiKey) {
+      setIsScanning(false);
       alert('AI 명함 인식을 위해 Google Gemini 무료 API 키를 등록해주세요.');
       onOpenApiKeyModal();
       return;
@@ -144,9 +139,8 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
     try {
       setIsScanning(true);
-      setScanStatusMessage('AI 모델 연결 중...');
+      setScanStatusMessage('AI 모델 연결 및 명함 정밀 판독 중...');
 
-      // 1. 오려낸 깨끗한 명함 사진으로 AI 텍스트 판독
       const extracted = await extractCardInfoWithGemini(
         croppedBase64,
         'image/jpeg',
@@ -169,14 +163,6 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
         setTagInput(extracted.tags.join(', '));
       }
 
-      // 2. 오려낸 명함 이미지를 Cloudflare R2에 업로드
-      setScanStatusMessage('오려낸 명함을 클라우드에 영구 저장 중...');
-      uploadCardImage(croppedBase64, 'image/jpeg')
-        .then((r2Url) => {
-          if (r2Url) setScannedImagePreview(r2Url);
-        })
-        .catch((err) => console.warn('R2 upload failed:', err));
-
       setScanStatusMessage('명함 오려내기 및 정보 추출 완료!');
       setTimeout(() => {
         setIsScanning(false);
@@ -187,9 +173,56 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       alert(err.message || '명함 판독 중 오류가 발생했습니다.');
       setIsScanning(false);
       setScanStatusMessage('');
-    } finally {
-      setIsScanning(false);
     }
+  };
+
+  // 1단계: 카메라 촬영 또는 사진 선택 시 즉시 초정밀 명함 테두리 자동 감지 & 오려내기
+  const handleImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setIsScanning(true);
+      setScanStatusMessage('사진 분석 및 스마트 명함 영역 자동 감지 중...');
+      const { dataUrl } = await resizeImageToDataUrl(file);
+      setRawPhotoDataUrl(dataUrl);
+
+      // 캔버스 기반 Center-Outward 초정밀 엣지 디텍션
+      const img = new Image();
+      img.onload = async () => {
+        try {
+          const bounds = detectCardBounds(img);
+          setDetectedCropRect(bounds);
+          const { croppedDataUrl, croppedBase64 } = await cropImageByRect(dataUrl, bounds);
+          await processCroppedImage(croppedDataUrl, croppedBase64);
+        } catch (cropErr) {
+          console.warn('Auto-crop error, falling back to full image:', cropErr);
+          const base64 = dataUrl.split(',')[1] || '';
+          await processCroppedImage(dataUrl, base64);
+        }
+      };
+      img.onerror = async () => {
+        const base64 = dataUrl.split(',')[1] || '';
+        await processCroppedImage(dataUrl, base64);
+      };
+      img.src = dataUrl;
+    } catch (err: any) {
+      setIsScanning(false);
+      alert(err.message || '사진 로딩에 실패했습니다.');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  // 2단계: 모달에서 수동으로 자르기 조정한 경우 호출
+  const handleCropComplete = async (croppedDataUrl: string, croppedBase64: string) => {
+    setScannedImagePreview(croppedDataUrl);
+    // Cloudflare R2에 새로 오려낸 이미지 업로드
+    uploadCardImage(croppedBase64, 'image/jpeg')
+      .then((r2Url) => {
+        if (r2Url) setScannedImagePreview(r2Url);
+      })
+      .catch((err) => console.warn('R2 upload failed:', err));
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -335,30 +368,47 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
 
             {/* Scanned & Cropped Card Preview Thumbnail */}
             {scannedImagePreview && !isScanning && (
-              <div className="mt-3.5 pt-3 border-t border-blue-200/60 flex items-center justify-between text-xs">
+              <div className="mt-3.5 pt-3 border-t border-blue-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs bg-white/70 p-3 rounded-2xl border border-blue-100">
                 <div className="flex items-center gap-3">
-                  <div className="p-0.5 bg-white border border-slate-300 rounded-lg shadow-xs">
+                  <div className="p-0.5 bg-white border border-slate-300 rounded-xl shadow-xs overflow-hidden shrink-0">
                     <img
                       src={scannedImagePreview}
                       alt="오려낸 명함 미리보기"
-                      className="w-18 h-11 object-contain rounded-md"
+                      className="w-20 h-12 object-contain rounded-lg bg-slate-50"
                     />
                   </div>
                   <div>
                     <span className="text-slate-800 font-bold flex items-center gap-1">
-                      <Check className="w-3.5 h-3.5 text-emerald-600 stroke-[3]" />
-                      <span>명함 본체만 깔끔하게 오려냄 완료!</span>
+                      <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                      <span>명함 본체 자동 오려내기 완료</span>
                     </span>
-                    <p className="text-[11px] text-slate-500">배경이 완전히 제거되었습니다.</p>
+                    <p className="text-[11px] text-slate-500">책상 배경이 완전히 제거되었습니다.</p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setScannedImagePreview(null)}
-                  className="text-slate-400 hover:text-rose-500 text-[11px] px-2 py-1 rounded-md hover:bg-white"
-                >
-                  사진 삭제
-                </button>
+
+                <div className="flex items-center gap-2 self-end sm:self-auto">
+                  {rawPhotoDataUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setIsCropModalOpen(true)}
+                      className="px-2.5 py-1.5 rounded-lg border border-slate-300 hover:bg-white text-slate-700 font-semibold text-[11px] transition flex items-center gap-1 shadow-2xs"
+                    >
+                      <Crop className="w-3.5 h-3.5 text-blue-600" />
+                      <span>영역 직접 조정</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScannedImagePreview(null);
+                      setRawPhotoDataUrl(null);
+                      setDetectedCropRect(null);
+                    }}
+                    className="text-slate-400 hover:text-rose-600 text-[11px] px-2 py-1.5 rounded-lg hover:bg-white transition"
+                  >
+                    사진 삭제
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -595,6 +645,7 @@ export const CardFormModal: React.FC<CardFormModalProps> = ({
       <ImageCropModal
         isOpen={isCropModalOpen}
         imageDataUrl={rawPhotoDataUrl}
+        initialCropRect={detectedCropRect || undefined}
         onClose={() => setIsCropModalOpen(false)}
         onCropComplete={handleCropComplete}
       />
